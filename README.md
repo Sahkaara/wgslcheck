@@ -1,243 +1,260 @@
 # wgslcheck
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)](https://isocpp.org/)
+**A static analyzer and CPU-side debugger for WGSL compute shaders — CLI-first, cross-backend, zero-dependency.**
+
 [![CI](https://github.com/Sahkaara/wgslcheck/actions/workflows/ci.yml/badge.svg)](https://github.com/Sahkaara/wgslcheck/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 
-**A small WGSL subset checker and CPU-side compute shader simulator written in
-C++20.**
+`wgslcheck` is a portable C++20 tool for debugging WGSL compute shaders **outside the browser**. Unlike RenderDoc or browser extensions, it runs anywhere — Linux, macOS, Windows, CI pipelines — without requiring a GPU.
 
-`wgslcheck` helps inspect and experiment with simple compute shaders without a
-GPU. It is an educational and debugging aid—not a complete WGSL validator, GPU
-implementation, or conformance tool.
+## What it does
 
-> [!WARNING]
-> This project implements only a limited WGSL subset. A successful check does
-> not guarantee that a shader is valid WGSL or will compile or behave correctly
-> on a GPU. Review [the current limitations](#supported-subset-and-limitations)
-> before relying on its results.
+- **`check`** — parse a WGSL file and run static checks, reporting issues with line/column in GNU format (`file:line:column: severity: message`)
+- **`sim`** — execute a compute shader on the CPU, with configurable `--entry` and `--dispatch`; useful for reproducing bugs, testing kernels without a GPU, and validating logic in CI
 
-## Contents
+Both subcommands work headlessly: no browser, no driver, no GPU.
 
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Build from source](#build-from-source)
-- [Command reference](#command-reference)
-- [Supported subset and limitations](#supported-subset-and-limitations)
-- [Project structure](#project-structure)
-- [Tests](#tests)
-- [Contributing](#contributing)
-- [License](#license)
+## Status
 
-## Features
+**v0.1.0 — usable.** Lexer, parser, analyzer, and CPU simulator are implemented.
 
-- WGSL-style tokenization, including nested block comments and source locations.
-- Parsing of attributed functions, parameter and return types, generic type
-  arguments, blocks, local variables, assignments, expressions, `if`/`else`,
-  and `return`.
-- Static checks for duplicate function, parameter, and local names; assignments
-  to immutable `let` values; shader-stage attributes; and compute workgroup
-  size.
-- CPU execution of a bounded number of compute invocations, with selected
-  invocation builtins, basic vectors, scalar arithmetic, conditionals, and
-  simple helper functions.
-- No third-party runtime dependencies.
+- [x] WGSL lexer
+- [x] WGSL parser (subset: functions, attributes, primitives, control flow)
+- [x] Static analyzer (`check`)
+- [x] CPU simulator (`sim` with `--entry` and `--dispatch`)
+- [x] `--version` and `--help`
+- [ ] Concurrent workgroup simulation (single workgroup at a time for now)
+- [ ] JSON output for CI integration
+
+See [`docs/architecture.md`](docs/architecture.md) for the internals.
 
 ## Quick start
 
-### Requirements
+**Requirements:** a C++20 compiler (`g++`, `clang++`, `cl.exe`) and CMake ≥ 3.20.
 
-- CMake 3.20 or newer.
-- A C++20-compatible compiler: MSVC, GCC, or Clang.
-
-### Configure, build, and test
-
-```sh
-cmake -S . -B build
-cmake --build build --config Release
-ctest --test-dir build --build-config Release --output-on-failure
+```bash
+git clone https://github.com/Sahkaara/wgslcheck.git
+cd wgslcheck
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/wgslcheck --version
 ```
 
-### Try the example
+You should see:
 
-```sh
-wgslcheck check examples/sample.wgsl
-wgslcheck sim examples/sample.wgsl --dispatch 2 1 1
+```
+wgslcheck 0.1.0
 ```
 
-Example output:
+## CLI usage
 
-```text
+```
+wgslcheck <command> [options] <file.wgsl>
+
+Commands:
+  check <file.wgsl>                              Run static checks
+  sim   <file.wgsl> [--entry NAME] [--dispatch X Y Z]   Execute on the CPU
+  --version                                      Print version
+  --help                                         Show this message
+```
+
+Exit codes:
+
+| Command | 0 | 1 | 2 |
+|---|---|---|---|
+| `check` | no issues found | I/O or usage error | parse error or analysis error |
+| `sim` | executed successfully | I/O or usage error | parse or simulation error |
+
+### `wgslcheck check`
+
+Parses the file and runs static checks. Silent on success.
+
+```bash
+$ ./wgslcheck check examples/sample.wgsl
 examples/sample.wgsl: no issues found (1 function(s) checked)
-Executed 16 invocation(s) of 'main' (workgroup_size=8x1x1, dispatch=2x1x1)
+exit: 0
 ```
 
-The commands above assume the executable is on your `PATH`. See
-[Build from source](#build-from-source) for the generated executable location
-and platform-specific invocation examples.
+On error:
 
-## Build from source
-
-The project has no third-party dependencies. Configure the build in a separate
-directory so generated files stay out of the source tree:
-
-```sh
-cmake -S . -B build
-cmake --build build --config Release
-ctest --test-dir build --build-config Release --output-on-failure
+```
+examples/bad.wgsl:12:5: error: unknown function 'undefined_function'
 ```
 
-The `--config Release` option works with both single- and
-multi-configuration generators. The executable is typically generated at:
+### `wgslcheck sim`
 
-| Platform / generator | Executable |
-| --- | --- |
-| Visual Studio | `build/Release/wgslcheck.exe` |
-| Single-configuration Windows | `build/wgslcheck.exe` |
-| Linux or macOS | `build/wgslcheck` |
+Executes a compute shader on the CPU. The default entry point is `main`; the default dispatch is `1 1 1`.
 
-PowerShell example:
+```bash
+$ ./wgslcheck sim examples/sample.wgsl
+Executed 8 invocation(s) of 'main' (workgroup_size=8x1x1, dispatch=1x1x1)
+exit: 0
+
+$ ./wgslcheck sim examples/sample.wgsl --dispatch 4 1 1
+Executed 32 invocation(s) of 'main' (workgroup_size=8x1x1, dispatch=4x1x1)
+exit: 0
+
+$ ./wgslcheck sim examples/sample.wgsl --entry my_kernel --dispatch 2 2 1
+Executed 8 invocation(s) of 'my_kernel' (workgroup_size=8x1x1, dispatch=2x2x1)
+```
+
+The simulator is **single-workgroup per invocation**: each workgroup runs independently on the CPU. Concurrent simulation of multiple workgroups (to expose data races) is on the roadmap.
+
+## Architecture
+
+```
+wgslcheck/
+├── include/wgslcheck/   # Public headers
+│   ├── ast.hpp          # AST node types
+│   ├── diagnostic.hpp   # Diagnostic struct (severity, line, column, message)
+│   ├── lexer.hpp        # Tokenizer interface
+│   ├── parser.hpp       # Recursive-descent parser
+│   ├── analyzer.hpp     # Static checks on the AST
+│   └── simulator.hpp    # CPU-side execution
+├── src/                 # Implementation
+│   ├── lexer.cpp
+│   ├── parser.cpp
+│   ├── analyzer.cpp
+│   ├── simulator.cpp
+│   └── main.cpp         # CLI (subcommand dispatch)
+├── examples/
+│   └── sample.wgsl      # Minimal compute shader used in docs and tests
+├── tests/
+│   └── test_basic.sh    # Smoke tests for the CLI
+└── docs/
+    └── architecture.md
+```
+
+**Design principles:**
+
+- **Zero dependencies.** Just the C++ standard library.
+- **Single binary.** No shared libraries, no runtime, no config files.
+- **Headless.** No GPU, no browser, no driver.
+- **CLI-first.** Every feature is available from the command line, ready for CI.
+- **Honest scope.** The parser supports a subset of WGSL, documented below. Unsupported constructs produce clear errors, not silent failures.
+
+## Supported WGSL subset
+
+`wgslcheck` implements a practical subset of WGSL — enough for real compute kernels, not the full language spec.
+
+| Feature | Supported | Notes |
+|---|:---:|---|
+| Functions (`fn`) | ✅ | Entry points and helpers |
+| Attributes (`@compute`, `@workgroup_size`, `@builtin`, `@group`, `@binding`) | ✅ | |
+| Primitive types (`u32`, `i32`, `f32`, `bool`) | ✅ | |
+| Vector types (`vec2`, `vec3`, `vec4`) | ✅ | |
+| Control flow (`if`, `else`, `loop`, `break`, `continue`, `return`) | ✅ | |
+| Variable declarations (`var`, `let`) | ✅ | |
+| Binary operators (`+`, `-`, `*`, `/`, `%`, comparisons) | ✅ | |
+| **Structs** | ❌ | Planned |
+| **Storage/texture bindings** | ❌ | Planned (parser accepts, simulator does not) |
+| **Swizzles** (`vec.xyz`) | ❌ | Planned |
+| **Built-in functions** (`dot`, `cross`, `length`, ...) | ❌ | Planned |
+| **Workgroup shared memory** (`var<workgroup>`) | ❌ | Planned |
+| **Barriers** (`workgroupBarrier()`) | ❌ | Planned |
+
+If you need one of the ❌ features, please [open an issue](https://github.com/Sahkaara/wgslcheck/issues).
+
+## Building from source
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+Override the compiler:
+
+```bash
+CXX=clang++ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+```
+
+### Windows
 
 ```powershell
-.\build\Release\wgslcheck.exe check examples\sample.wgsl
-.\build\Release\wgslcheck.exe sim examples\sample.wgsl --dispatch 2 1 1
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+.\build\Release\wgslcheck.exe --version
 ```
 
-Linux or macOS example:
+## Testing
 
-```sh
-./build/wgslcheck check examples/sample.wgsl
-./build/wgslcheck sim examples/sample.wgsl --dispatch 2 1 1
+```bash
+bash tests/test_basic.sh
 ```
 
-## Command reference
+The smoke suite covers:
 
-```text
-wgslcheck --help
-wgslcheck --version
-wgslcheck check <file.wgsl>
-wgslcheck sim <file.wgsl> [--entry NAME] [--dispatch X Y Z]
+- `--version` and `--help` output
+- `check` on a valid file (exit 0) and on an invalid one (exit 2)
+- `sim` with default dispatch and with `--dispatch`
+- exit codes for usage errors
+
+Golden-file tests live in `tests/cases/` — drop a `foo.wgsl` and its expected `foo.expected` and the suite picks it up automatically.
+
+## CI integration
+
+Add `.github/workflows/ci.yml` (already present in this repo):
+
+```yaml
+name: CI
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: bash tests/test_basic.sh
 ```
 
-### `check`
+Use it in a pipeline:
 
-```sh
-wgslcheck check examples/sample.wgsl
+```yaml
+- name: Check shaders
+  run: ./build/wgslcheck check shaders/*.wgsl
+
+- name: Simulate
+  run: ./build/wgslcheck sim shaders/game_of_life.wgsl --dispatch 64 64 1
 ```
 
-Reads the source, tokenizes and parses supported function declarations, then
-runs the implemented static checks. On success it prints the number of
-functions checked. Diagnostics are written to standard error and include the
-source path and line/column where available.
+## Roadmap
 
-### `sim`
+- [x] WGSL lexer
+- [x] WGSL parser (functions, attributes, primitives, control flow)
+- [x] Static analyzer (`check`)
+- [x] CPU simulator (`sim`, `--entry`, `--dispatch`)
+- [ ] Structs and storage/texture bindings
+- [ ] Built-in functions (`dot`, `cross`, `length`, ...)
+- [ ] Workgroup shared memory and barriers
+- [ ] Concurrent workgroup simulation (expose data races)
+- [ ] JSON output for CI integration
+- [ ] Pre-built binaries via GitHub Releases
 
-```sh
-# Select the first compute entry point; dispatch one workgroup
-wgslcheck sim examples/sample.wgsl
-
-# Select an entry point and dispatch two workgroups along X
-wgslcheck sim examples/sample.wgsl --entry main --dispatch 2 1 1
-```
-
-| Option | Description |
-| --- | --- |
-| `--entry NAME` | Select a compute entry point. Defaults to the first compute entry point in the source. |
-| `--dispatch X Y Z` | Number of workgroups along each axis. Defaults to `1 1 1`; each value must be a positive integer. |
-
-The simulator executes each invocation in the selected entry point and prints
-an execution summary. The total dispatch is capped at 4096 invocations.
-
-Supported compute builtins:
-
-- `global_invocation_id`
-- `local_invocation_id`
-- `workgroup_id`
-- `num_workgroups`
-- `local_invocation_index`
-
-The simulator also supports initialized local `var` and `let` declarations,
-assignments to mutable locals, scalar expressions, conditionals, returns,
-simple helper functions, vector constructors and member access, scalar
-conversions, and a small set of common scalar functions.
-
-### Exit codes
-
-| Code | Meaning |
-| --- | --- |
-| `0` | Command completed successfully. `--help` and `--version` also return `0`. |
-| `1` | Invalid command-line usage, unknown command, or unknown option. |
-| `2` | File, lexing, parsing, analysis, or simulation error. |
-
-## Supported subset and limitations
-
-The parser currently accepts top-level function declarations, function
-attributes and parameter attributes, generic type arguments, and these
-function-body constructs:
-
-- Local `let` and `var` declarations.
-- Assignments and expression statements.
-- Unary and binary scalar expressions, function calls, and vector member
-  access.
-- Blocks, `if`/`else`, and `return`.
-
-The analyzer checks duplicate function/parameter/local names, assignments to
-immutable local values, shader-stage attribute combinations, and compute
-`@workgroup_size`. The workgroup size must contain one to three positive
-integer literals; each dimension is at most 256 and the product is at most 256
-invocations.
-
-This is **not a full WGSL type checker**. It does not currently parse module
-declarations such as structures, global variables, resources, or overrides.
-Loops, `switch`, pointers, and other statements outside the list above are not
-supported. It also does not validate all WGSL typing rules, resource layouts,
-stage interfaces, control-flow uniformity, or target-specific constraints.
-
-The CPU simulator does not emulate storage/resource memory, output buffers,
-atomics, barriers, or textures. It does not reproduce exact WGSL integer
-overflow, floating-point, or GPU execution semantics. A successful `check`
-means only that the source passed this project's implemented subset checks.
-Use a standards-compliant WGSL implementation for validation and GPU builds.
-
-For implementation details, see [the architecture notes](docs/architecture.md).
-
-## Project structure
-
-```text
-include/wgslcheck/  Public headers, AST, and diagnostics
-src/                CLI, lexer, parser, analyzer, and simulator
-tests/              Unit and command-line tests
-examples/            Example compute shader
-docs/                Architecture and implementation notes
-```
-
-## Tests
-
-Run the CMake/CTest suite after building:
-
-```sh
-ctest --test-dir build --build-config Release --output-on-failure
-```
-
-The suite includes unit coverage for lexing, parsing, analysis, and simulation,
-as well as CLI checks against the sample shader.
+See the [issues](https://github.com/Sahkaara/wgslcheck/issues) for the live roadmap.
 
 ## Contributing
 
-Bug reports and contributions are welcome. When changing the supported
-language subset, please include focused tests and update this README and the
-[architecture notes](docs/architecture.md) as appropriate. Before opening a
-pull request, build the project and run CTest:
+Contributions are welcome — bug reports, feature requests, docs, tests, code.
 
-```sh
-cmake --build build --config Release
-ctest --test-dir build --build-config Release --output-on-failure
-```
+1. **Open an issue first** for non-trivial changes.
+2. **Fork, branch, PR.** One feature or fix per PR.
+3. **Follow the existing style.** 4-space indent, `snake_case` for functions, `PascalCase` for types.
+4. **Add a test.** If you're fixing a bug, add a test that fails before your fix.
+5. **Run `bash tests/test_basic.sh` before pushing.**
 
-Please include a concise description of the change and any relevant
-limitations or compatibility impact in the pull request.
+Good first issues are labeled [`good first issue`](https://github.com/Sahkaara/wgslcheck/labels/good%20first%20issue).
 
 ## License
 
-`wgslcheck` is distributed under the MIT License. See [LICENSE](LICENSE) for
-the complete text.
+MIT — see [LICENSE](LICENSE).
+
+## Acknowledgments
+
+- [WGSL spec](https://www.w3.org/TR/WGSL/) — the language reference.
+- [Bevy](https://bevyengine.org/) and [wgpu](https://wgpu.rs/) — real-world WGSL used to test the parser.
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) — inspiration for the "zero-dependency, single-binary" philosophy.
