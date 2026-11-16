@@ -209,9 +209,11 @@ private:
         switch (expression.kind) {
         case Expression::Kind::number: {
             std::string literal = expression.text;
-            // Strip type suffixes (u, i, f, h) before parsing
-            while (!literal.empty() && (literal.back() == 'u' || literal.back() == 'i' ||
-                                        literal.back() == 'f' || literal.back() == 'h')) {
+            // In hexadecimal integers, a trailing 'f' is a digit, not a suffix.
+            const bool hexadecimal = literal.size() > 2 && literal[0] == '0' &&
+                (literal[1] == 'x' || literal[1] == 'X');
+            if (!literal.empty() && (literal.back() == 'u' || literal.back() == 'i' ||
+                (!hexadecimal && (literal.back() == 'f' || literal.back() == 'h')))) {
                 literal.pop_back();
             }
             try {

@@ -196,6 +196,22 @@ void test_unsupported_builtin_is_reported() {
     expect(!simulation.ok(), "simulator should report missing builtin annotation");
 }
 
+void test_numeric_literal_values() {
+    const char* cases[] = {
+        "0xf == 15", "0xff == 255", "0xffu == 255u",
+        "0x1fi == 31i", "0xFF == 255", "0Xff == 255",
+        "1.5f == 1.5", "2.0h == 2.0", "1e2f == 100.0"
+    };
+    for (const auto* condition : cases) {
+        std::vector<wgslcheck::Diagnostic> diagnostics;
+        auto module = parse(
+            std::string("@compute @workgroup_size(1) fn main() { if (!(") +
+            condition + ")) { let failure = 1 / 0; } }", diagnostics);
+        expect(diagnostics.empty(), "numeric literal regression should parse");
+        expect(wgslcheck::Simulator{}.run(module, {}).ok(), condition);
+    }
+}
+
 void test_struct_parsing() {
     std::vector<wgslcheck::Diagnostic> diagnostics;
     auto module = parse(
@@ -229,6 +245,7 @@ int main() {
     test_helper_calls_and_compound_shifts();
     test_unsupported_builtin_is_reported();
     test_struct_parsing();
+    test_numeric_literal_values();
     
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
