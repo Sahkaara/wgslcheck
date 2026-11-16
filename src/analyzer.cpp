@@ -123,6 +123,15 @@ AnalysisResult Analyzer::analyze(const Module& module) const {
     AnalysisResult result;
     std::unordered_map<std::string, SourceLocation> function_names;
 
+    // NEW: Check for duplicate struct names
+    std::unordered_set<std::string> struct_names;
+    for (const auto& struct_node : module.structs) {
+        if (!struct_names.insert(struct_node.name).second) {
+            add_error(result, "duplicate struct '" + struct_node.name + "'",
+                      struct_node.span.start);
+        }
+    }
+
     for (const auto& function : module.functions) {
         // 1. Check for duplicate function names
         const auto inserted = function_names.emplace(function.name, function.span.start);
