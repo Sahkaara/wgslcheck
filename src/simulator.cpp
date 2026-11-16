@@ -459,11 +459,29 @@ private:
                        std::unordered_map<std::string, Value>& environment,
                        unsigned call_depth) {
         std::vector<std::string> declared;
+        std::unordered_map<std::string, Value> shadowed;
+        std::unordered_map<std::string, std::size_t> shadowed_immutable;
+        const auto restore_scope = [&] {
+            for (const auto& name : declared) {
+                const auto previous = shadowed.find(name);
+                if (previous != shadowed.end()) {
+                    environment.insert_or_assign(name, std::move(previous->second));
+                } else {
+                    environment.erase(name);
+                }
+                immutable_.erase(name);
+                const auto previous_immutable = shadowed_immutable.find(name);
+                if (previous_immutable != shadowed_immutable.end()) {
+                    immutable_[name] = previous_immutable->second;
+                }
+            }
+        };
         try {
             for (const auto& statement : block.statements) {
                 // 1. Variable declarations
                 if (statement->kind == Statement::Kind::variable) {
-                    if (environment.count(statement->name) != 0) {
+                    if (std::find(declared.begin(), declared.end(), statement->name) !=
+                        declared.end()) {
                         fail("variable '" + statement->name + "' is already declared",
                              statement->span.start);
                     }
@@ -471,8 +489,19 @@ private:
                         fail("simulator does not support uninitialized variables",
                              statement->span.start);
                     }
-                    environment.emplace(statement->name,
-                        evaluate(*statement->expression, environment, call_depth));
+                    // Evaluate before replacing the binding: the initializer may
+                    // refer to a variable of the same name in the enclosing scope.
+                    Value initial = evaluate(*statement->expression, environment, call_depth);
+                    const auto previous = environment.find(statement->name);
+                    if (previous != environment.end()) {
+                        shadowed.emplace(statement->name, std::move(previous->second));
+                    }
+                    const auto previous_immutable = immutable_.find(statement->name);
+                    if (previous_immutable != immutable_.end()) {
+                        shadowed_immutable.emplace(statement->name, previous_immutable->second);
+                        immutable_.erase(previous_immutable);
+                    }
+                    environment.insert_or_assign(statement->name, std::move(initial));
                     declared.push_back(statement->name);
                     if (!statement->mutable_variable) mark_immutable(statement->name);
                     continue;
@@ -579,25 +608,16 @@ private:
             }
         } catch (const ReturnSignal&) {
             // Cleanup scope before propagating the return signal
-            for (const auto& name : declared) {
-                environment.erase(name);
-                release_immutable(name);
-            }
+            restore_scope();
             throw;
         } catch (const RuntimeFailure&) {
             // Cleanup scope before propagating the runtime error
-            for (const auto& name : declared) {
-                environment.erase(name);
-                release_immutable(name);
-            }
+            restore_scope();
             throw;
         }
         
         // Cleanup scope on normal block exit
-        for (const auto& name : declared) {
-            environment.erase(name);
-            release_immutable(name);
-        }
+        restore_scope();
     }
 
     SimulationResult& result_;

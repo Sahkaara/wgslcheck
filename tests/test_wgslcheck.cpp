@@ -196,6 +196,44 @@ void test_unsupported_builtin_is_reported() {
     expect(!simulation.ok(), "simulator should report missing builtin annotation");
 }
 
+void test_nested_variable_scopes() {
+    std::vector<wgslcheck::Diagnostic> diagnostics;
+    auto module = parse(
+        "@compute @workgroup_size(2) fn main() {\n"
+        "  let value = 10u; var total = 0u;\n"
+        "  if (true) {\n"
+        "    var value = value + 1u; value += 1u; total = value;\n"
+        "    if (true) { let value = 99u; total += value; }\n"
+        "    value += 1u;\n"
+        "    if (value != 13u) { let failure = 1 / 0; }\n"
+        "  }\n"
+        "  if (value != 10u || total != 111u) { let failure = 1 / 0; }\n"
+        "}\n", diagnostics);
+    expect(diagnostics.empty(), "nested variable scopes should parse");
+    expect(wgslcheck::Analyzer{}.analyze(module).ok(),
+           "nested variable scopes should pass analysis");
+    expect(wgslcheck::Simulator{}.run(module, {}).ok(),
+           "shadowed values and mutability must be restored after nested blocks");
+
+    auto immutable = parse(
+        "@compute @workgroup_size(1) fn main() {\n"
+        "  let value = 1u; if (true) { var value = 2u; value += 1u; }\n"
+        "  value = 3u;\n"
+        "}\n", diagnostics);
+    const auto result = wgslcheck::Simulator{}.run(immutable, {});
+    expect(!result.ok(), "shadowing must preserve outer let protection");
+    if (!result.diagnostics.empty()) {
+        expect(result.diagnostics.front().message.find("immutable") != std::string::npos,
+               "assignment after shadowing must fail for immutability");
+    }
+
+    auto duplicate = parse(
+        "@compute @workgroup_size(1) fn main() { var value = 1; var value = 2; }",
+        diagnostics);
+    expect(!wgslcheck::Simulator{}.run(duplicate, {}).ok(),
+           "duplicate declarations in the same block must still fail");
+}
+
 void test_numeric_suffix_validation() {
     const char* invalid[] = {"0x1uu", "0x1ui", "0x1ii", "0xffiu",
                              "1.5u", "1.5i", "1e2u", "1e2i"};
@@ -328,6 +366,7 @@ int main() {
     test_function_mutability_isolation();
     test_else_if_execution();
     test_numeric_suffix_validation();
+    test_nested_variable_scopes();
     
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
