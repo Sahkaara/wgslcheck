@@ -553,10 +553,15 @@ private:
                 
                 // 4. If statements
                 if (statement->kind == Statement::Kind::if_statement) {
-                    const bool condition = truthy(evaluate(*statement->expression,
-                                                           environment, call_depth));
-                    const Statement* branch = condition ? statement->then_branch.get()
-                                                        : statement->else_branch.get();
+                    const Statement* branch = statement.get();
+                    // An else-if is another conditional node, not a block.
+                    while (branch != nullptr &&
+                           branch->kind == Statement::Kind::if_statement) {
+                        const bool condition = truthy(evaluate(*branch->expression,
+                                                               environment, call_depth));
+                        branch = condition ? branch->then_branch.get()
+                                           : branch->else_branch.get();
+                    }
                     if (branch != nullptr) execute_block(*branch, environment, call_depth);
                     continue;
                 }

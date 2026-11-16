@@ -196,6 +196,31 @@ void test_unsupported_builtin_is_reported() {
     expect(!simulation.ok(), "simulator should report missing builtin annotation");
 }
 
+void test_else_if_execution() {
+    std::vector<wgslcheck::Diagnostic> diagnostics;
+    auto module = parse(
+        "fn choose(value: u32) -> u32 {\n"
+        "  if (value == 0u) { return 10u; }\n"
+        "  else if (value == 1u) { return 20u; }\n"
+        "  else if (value == 2u) { return 30u; }\n"
+        "  else { return 40u; }\n"
+        "}\n"
+        "@compute @workgroup_size(4)\n"
+        "fn main(@builtin(local_invocation_index) index: u32) {\n"
+        "  if (choose(index) != (index + 1u) * 10u) { let failure = 1 / 0; }\n"
+        "  var value = 0u;\n"
+        "  if (false) { value = 1u; } else if (false) { value = 2u; }\n"
+        "  if (value != 0u) { let failure = 1 / 0; }\n"
+        "  if (true) { value = 3u; } else if (1 / 0 == 0) { value = 4u; }\n"
+        "  if (value != 3u) { let failure = 1 / 0; }\n"
+        "}\n", diagnostics);
+    expect(diagnostics.empty(), "else-if regression should parse");
+    expect(wgslcheck::Analyzer{}.analyze(module).ok(),
+           "else-if regression should pass analysis");
+    expect(wgslcheck::Simulator{}.run(module, {}).ok(),
+           "else-if chains must select the correct branch and propagate returns");
+}
+
 void test_function_mutability_isolation() {
     std::vector<wgslcheck::Diagnostic> diagnostics;
     auto module = parse(
@@ -275,6 +300,7 @@ int main() {
     test_struct_parsing();
     test_numeric_literal_values();
     test_function_mutability_isolation();
+    test_else_if_execution();
     
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
