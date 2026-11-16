@@ -196,6 +196,32 @@ void test_unsupported_builtin_is_reported() {
     expect(!simulation.ok(), "simulator should report missing builtin annotation");
 }
 
+void test_numeric_suffix_validation() {
+    const char* invalid[] = {"0x1uu", "0x1ui", "0x1ii", "0xffiu",
+                             "1.5u", "1.5i", "1e2u", "1e2i"};
+    for (const auto* literal : invalid) {
+        wgslcheck::Lexer lexer(literal);
+        const auto tokens = lexer.tokenize();
+        expect(wgslcheck::has_errors(lexer.diagnostics()), literal);
+        expect(tokens.back().kind == wgslcheck::TokenKind::end_of_file,
+               "malformed numeric suffix must still reach EOF");
+        if (!lexer.diagnostics().empty()) {
+            expect(lexer.diagnostics().front().location.line == 1 &&
+                   lexer.diagnostics().front().location.column == 1,
+                   "numeric suffix diagnostic should point to the literal");
+        }
+    }
+    const char* valid[] = {"0xff", "0xffu", "0x1i", "12u", "12i",
+                           "1.5f", "1.5h", "1e2f", "1e2"};
+    for (const auto* literal : valid) {
+        wgslcheck::Lexer lexer(literal);
+        const auto tokens = lexer.tokenize();
+        expect(lexer.diagnostics().empty(), literal);
+        expect(tokens.size() == 2 && tokens.front().lexeme == literal,
+               "valid numeric literal must remain a single intact token");
+    }
+}
+
 void test_else_if_execution() {
     std::vector<wgslcheck::Diagnostic> diagnostics;
     auto module = parse(
@@ -301,6 +327,7 @@ int main() {
     test_numeric_literal_values();
     test_function_mutability_isolation();
     test_else_if_execution();
+    test_numeric_suffix_validation();
     
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

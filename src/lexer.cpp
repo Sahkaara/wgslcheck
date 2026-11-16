@@ -227,9 +227,13 @@ void Lexer::scan_number() {
         if (digits_start == offset_) {
             report("expected hexadecimal digits after 0x", token_start_);
         }
-        // Consume integer type suffixes (i or u)
-        while (peek() == 'i' || peek() == 'u') {
+        // A hexadecimal integer may have only one type suffix.
+        if (peek() == 'i' || peek() == 'u') {
             advance();
+            if (peek() == 'i' || peek() == 'u') {
+                report("numeric literal may have only one type suffix", token_start_);
+                while (peek() == 'i' || peek() == 'u') advance();
+            }
         }
     } else {
         while (peek() >= '0' && peek() <= '9') {
@@ -263,6 +267,9 @@ void Lexer::scan_number() {
             floating = true;
             advance();
         } else if (peek() == 'i' || peek() == 'u') {
+            if (floating) {
+                report("floating-point literal cannot have an integer suffix", token_start_);
+            }
             advance();
         }
     }
