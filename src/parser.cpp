@@ -6,6 +6,9 @@
 namespace wgslcheck {
 namespace {
 
+// Sentinel exception used for clean error unwinding.
+// When a syntax error occurs, we throw ParseFailure, which unwinds the 
+// recursive descent stack until caught in the main parse loop (or block loop).
 struct ParseFailure {};
 
 bool is_assignment(TokenKind kind) {
@@ -20,11 +23,16 @@ bool is_assignment(TokenKind kind) {
 } // namespace
 
 Parser::Parser(std::vector<Token> tokens) : tokens_(std::move(tokens)) {
+    // Ensure the token stream always ends with EOF for safe lookahead.
     if (tokens_.empty() || tokens_.back().kind != TokenKind::end_of_file) {
         tokens_.push_back({TokenKind::end_of_file, {}, {}});
     }
 }
 
+/**
+ * @brief Main parsing loop. 
+ * Parses top-level attributes and functions until EOF.
+ */
 Module Parser::parse() {
     Module module;
     while (!at_end()) {
@@ -32,12 +40,18 @@ Module Parser::parse() {
         try {
             std::vector<Attribute> attributes;
             parse_attributes(attributes);
-            if (!check(TokenKind::identifier) || current().lexeme != "fn") {
-                report("expected a function declaration (only functions are supported)",
-                       current().span.start);
-                synchronize();
-            } else {
+            
+            // NEW: Handle both functions and structs at the top level.
+            if (check(TokenKind::identifier) && current().lexeme == "fn") {
                 module.functions.push_back(parse_function(std::move(attributes)));
+            } else if (check(TokenKind::identifier) && current().lexeme == "struct") {
+                if (!attributes.empty()) {
+                    report("attributes are not supported on structs", attributes.front().span.start);
+                }
+                module.structs.push_back(parse_struct());
+            } else {
+                report("expected a function or struct declaration", current().span.start);
+                synchronize();
             }
         } catch (const ParseFailure&) {
             synchronize();
@@ -69,6 +83,10 @@ bool Parser::check(TokenKind kind) const noexcept {
     return current().kind == kind;
 }
 
+/**
+ * @brief Consumes the current token if it matches the expected kind.
+ * @return true if matched and consumed, false otherwise.
+ */
 bool Parser::match(TokenKind kind) {
     if (!check(kind)) {
         return false;
@@ -79,6 +97,10 @@ bool Parser::match(TokenKind kind) {
     return true;
 }
 
+/**
+ * @brief Consumes the current token or throws a fatal ParseFailure.
+ * Reports a diagnostic error if the token doesn't match.
+ */
 const Token& Parser::consume(TokenKind kind, const char* message) {
     if (check(kind)) {
         const Token& token = current();
@@ -91,18 +113,31 @@ const Token& Parser::consume(TokenKind kind, const char* message) {
     throw ParseFailure{};
 }
 
+/**
+ * @brief Error recovery mechanism.
+ * Skips tokens until a statement boundary (semicolon) or a top-level 
+ * declaration keyword (e.g., 'fn' or '@') is found.
+ */
 void Parser::synchronize() {
     while (!at_end()) {
         if (previous().kind == TokenKind::semicolon) {
             return;
         }
-        if (check(TokenKind::at) || (check(TokenKind::identifier) && current().lexeme == "fn")) {
+        if (check(TokenKind::at)) {
+            return;
+        }
+        // NEW: Stop synchronizing if we find the start of a new top-level declaration.
+        if (check(TokenKind::identifier) && 
+            (current().lexeme == "fn" || current().lexeme == "struct")) {
             return;
         }
         ++current_;
     }
 }
 
+/**
+ * @brief Parses zero or more attributes (e.g., @compute @workgroup_size(8, 1, 1)).
+ */
 void Parser::parse_attributes(std::vector<Attribute>& attributes) {
     while (match(TokenKind::at)) {
         const SourceLocation start = previous().span.start;
@@ -150,6 +185,10 @@ std::vector<std::string> Parser::parse_attribute_arguments() {
     return arguments;
 }
 
+/**
+ * @brief Parses a function signature and body.
+ * Example: fn main(@builtin(global_id) id: vec3<u32>) -> f32 { ... }
+ */
 Function Parser::parse_function(std::vector<Attribute> attributes) {
     const Token& start = consume(TokenKind::identifier, "expected 'fn'");
     const Token& name = consume(TokenKind::identifier, "expected function name");
@@ -157,6 +196,7 @@ Function Parser::parse_function(std::vector<Attribute> attributes) {
     function.name = name.lexeme;
     function.attributes = std::move(attributes);
     function.span.start = start.span.start;
+    
     consume(TokenKind::left_paren, "expected '(' after function name");
     if (!check(TokenKind::right_paren)) {
         do {
@@ -164,14 +204,68 @@ Function Parser::parse_function(std::vector<Attribute> attributes) {
         } while (match(TokenKind::comma) && !check(TokenKind::right_paren));
     }
     consume(TokenKind::right_paren, "expected ')' after function parameters");
+    
+    // Optional return type
     if (match(TokenKind::arrow)) {
         std::vector<Attribute> return_attributes;
         parse_attributes(return_attributes);
         function.return_type = parse_type();
     }
+    
     function.body = parse_block();
     function.span.end = previous().span.end;
     return function;
+}
+
+/**
+ * @brief Parses a WGSL struct definition.
+ */
+Struct Parser::parse_struct() {
+    const Token& start = consume(TokenKind::identifier, "expected 'struct'");
+    const Token& name = consume(TokenKind::identifier, "expected struct name");
+    
+    Struct struct_node;
+    struct_node.name = name.lexeme;
+    struct_node.span.start = start.span.start;
+    
+    consume(TokenKind::left_brace, "expected '{' after struct name");
+    
+    while (!check(TokenKind::right_brace) && !at_end()) {
+        struct_node.members.push_back(parse_struct_member());
+        
+        // Members are separated by commas. Allow trailing commas.
+        if (match(TokenKind::comma)) {
+            continue;
+        }
+        
+        if (!check(TokenKind::right_brace)) {
+            report("expected ',' or '}' after struct member", current().span.start);
+            throw ParseFailure{};
+        }
+    }
+    
+    const Token& close = consume(TokenKind::right_brace, "expected '}' after struct members");
+    struct_node.span.end = close.span.end;
+    return struct_node;
+}
+
+/**
+ * @brief Parses a single member inside a struct.
+ * Example: `@align(16) position: vec3<f32>`
+ */
+StructMember Parser::parse_struct_member() {
+    StructMember member;
+    parse_attributes(member.attributes);
+    
+    const Token& name = consume(TokenKind::identifier, "expected member name");
+    member.name = name.lexeme;
+    member.span.start = name.span.start;
+    
+    consume(TokenKind::colon, "expected ':' after member name");
+    member.type = parse_type();
+    member.span.end = previous().span.end;
+    
+    return member;
 }
 
 Parameter Parser::parse_parameter() {
@@ -186,6 +280,10 @@ Parameter Parser::parse_parameter() {
     return parameter;
 }
 
+/**
+ * @brief Parses a type name, including generic types (e.g., vec3<f32>, array<u32, 4>).
+ * Handles nested angle brackets and disambiguates the '>>' shift operator.
+ */
 std::string Parser::parse_type() {
     const Token& first = consume(TokenKind::identifier, "expected type");
     std::string type = first.lexeme;
@@ -198,6 +296,8 @@ std::string Parser::parse_type() {
             } else if (check(TokenKind::greater)) {
                 --depth;
             } else if (check(TokenKind::shift_right)) {
+                // Edge case: '>>' can close two generic brackets, 
+                // but this lexer treats it as a shift operator.
                 if (depth < 2) {
                     report("unexpected '>>' in generic type", current().span.start);
                     throw ParseFailure{};
@@ -219,11 +319,15 @@ std::string Parser::parse_type() {
     return type;
 }
 
+/**
+ * @brief Parses a block of statements enclosed in braces { ... }.
+ */
 std::unique_ptr<Statement> Parser::parse_block() {
     const Token& open = consume(TokenKind::left_brace, "expected '{' to begin function body");
     auto block = std::make_unique<Statement>();
     block->kind = Statement::Kind::block;
     block->span.start = open.span.start;
+    
     while (!check(TokenKind::right_brace) && !at_end()) {
         const std::size_t before = current_;
         try {
@@ -233,11 +337,16 @@ std::unique_ptr<Statement> Parser::parse_block() {
         }
         if (before == current_ && !at_end()) ++current_;
     }
+    
     const Token& close = consume(TokenKind::right_brace, "expected '}' after function body");
     block->span.end = close.span.end;
     return block;
 }
 
+/**
+ * @brief Parses a single statement.
+ * Handles block scopes, variable declarations, assignments, returns, and if-statements.
+ */
 std::unique_ptr<Statement> Parser::parse_statement() {
     if (check(TokenKind::left_brace)) {
         return parse_block();
@@ -245,6 +354,8 @@ std::unique_ptr<Statement> Parser::parse_statement() {
 
     auto statement = std::make_unique<Statement>();
     statement->span.start = current().span.start;
+    
+    // 1. Variable declaration (let / var)
     if (check(TokenKind::identifier) &&
         (current().lexeme == "let" || current().lexeme == "var")) {
         statement->mutable_variable = current().lexeme == "var";
@@ -253,10 +364,11 @@ std::unique_ptr<Statement> Parser::parse_statement() {
         const Token& name = consume(TokenKind::identifier, "expected variable name");
         statement->name = name.lexeme;
         if (match(TokenKind::colon)) statement->type = parse_type();
+        
         if (match(TokenKind::equal)) {
             statement->expression = parse_expression();
         } else if (!statement->type.empty() && statement->mutable_variable) {
-            // WGSL permits an explicitly typed var without an initializer.
+            // Valid: `var x: f32;` (explicit type, no initializer)
         } else {
             report("expected ':' or '=' after variable name", current().span.start);
             throw ParseFailure{};
@@ -266,24 +378,31 @@ std::unique_ptr<Statement> Parser::parse_statement() {
             throw ParseFailure{};
         }
         consume(TokenKind::semicolon, "expected ';' after variable declaration");
+        
+    // 2. Return statement
     } else if (check(TokenKind::identifier) && current().lexeme == "return") {
         ++current_;
         statement->kind = Statement::Kind::return_statement;
         if (!check(TokenKind::semicolon)) statement->expression = parse_expression();
         consume(TokenKind::semicolon, "expected ';' after return");
+        
+    // 3. If statement
     } else if (check(TokenKind::identifier) && current().lexeme == "if") {
         ++current_;
         statement->kind = Statement::Kind::if_statement;
         statement->expression = parse_expression();
         statement->then_branch = parse_block();
+        
         if (check(TokenKind::identifier) && current().lexeme == "else") {
             ++current_;
             if (check(TokenKind::identifier) && current().lexeme == "if") {
-                statement->else_branch = parse_statement();
+                statement->else_branch = parse_statement(); // else if
             } else {
-                statement->else_branch = parse_block();
+                statement->else_branch = parse_block();    // else
             }
         }
+        
+    // 4. Assignment or Expression statement
     } else {
         auto lhs = parse_expression();
         if (is_assignment(current().kind)) {
@@ -307,15 +426,23 @@ std::unique_ptr<Expression> Parser::parse_expression() {
     return parse_precedence(1);
 }
 
+/**
+ * @brief Pratt Parser (Precedence Climbing) for expressions.
+ * This elegantly handles operator precedence (e.g., multiplication before addition)
+ * and associativity by recursively parsing sub-expressions with higher binding powers.
+ */
 std::unique_ptr<Expression> Parser::parse_precedence(int minimum_precedence) {
     auto left = parse_prefix();
+    
     for (;;) {
+        // Function calls have the highest precedence (handled immediately).
         if (check(TokenKind::left_paren) && 9 >= minimum_precedence) {
             ++current_;
             auto call = std::make_unique<Expression>();
             call->kind = Expression::Kind::call;
             call->span.start = left->span.start;
             call->children.push_back(std::move(left));
+            
             if (!check(TokenKind::right_paren)) {
                 do {
                     call->children.push_back(parse_expression());
@@ -326,6 +453,8 @@ std::unique_ptr<Expression> Parser::parse_precedence(int minimum_precedence) {
             left = std::move(call);
             continue;
         }
+        
+        // Member access (e.g., vec.x) also has very high precedence.
         if (match(TokenKind::dot)) {
             const Token& member = consume(TokenKind::identifier, "expected member name after '.'");
             auto node = std::make_unique<Expression>();
@@ -337,11 +466,16 @@ std::unique_ptr<Expression> Parser::parse_precedence(int minimum_precedence) {
             continue;
         }
 
+        // Check for binary operators.
         const int current_precedence = precedence(current().kind);
         if (current_precedence < minimum_precedence) break;
+        
         const Token operation = current();
         ++current_;
+        
+        // Right-associative parsing: pass precedence + 1 to the recursive call.
         auto right = parse_precedence(current_precedence + 1);
+        
         auto binary = std::make_unique<Expression>();
         binary->kind = Expression::Kind::binary;
         binary->text = operation.lexeme;
@@ -353,8 +487,13 @@ std::unique_ptr<Expression> Parser::parse_precedence(int minimum_precedence) {
     return left;
 }
 
+/**
+ * @brief Parses primary expressions and unary operators.
+ */
 std::unique_ptr<Expression> Parser::parse_prefix() {
     const Token token = current();
+    
+    // Unary operators (e.g., -x, !x, ~x)
     if (match(TokenKind::bang) || match(TokenKind::minus) || match(TokenKind::plus) ||
         match(TokenKind::tilde)) {
         auto expression = std::make_unique<Expression>();
@@ -365,12 +504,16 @@ std::unique_ptr<Expression> Parser::parse_prefix() {
         expression->span.end = expression->children.front()->span.end;
         return expression;
     }
+    
+    // Parenthesized expression
     if (match(TokenKind::left_paren)) {
         auto expression = parse_expression();
         const Token& close = consume(TokenKind::right_paren, "expected ')' after expression");
         expression->span = {token.span.start, close.span.end};
         return expression;
     }
+    
+    // Literals
     if (match(TokenKind::integer_literal) || match(TokenKind::float_literal)) {
         auto expression = std::make_unique<Expression>();
         expression->kind = Expression::Kind::number;
@@ -378,6 +521,8 @@ std::unique_ptr<Expression> Parser::parse_prefix() {
         expression->span = token.span;
         return expression;
     }
+    
+    // Identifiers and booleans
     if (match(TokenKind::identifier)) {
         auto expression = std::make_unique<Expression>();
         expression->kind = token.lexeme == "true" || token.lexeme == "false"
@@ -386,10 +531,15 @@ std::unique_ptr<Expression> Parser::parse_prefix() {
         expression->span = token.span;
         return expression;
     }
+    
     report("expected expression", current().span.start);
     throw ParseFailure{};
 }
 
+/**
+ * @brief Assigns a binding power (precedence) to binary operators.
+ * Higher numbers bind tighter. Returns 0 if the token is not a binary operator.
+ */
 int Parser::precedence(TokenKind kind) const noexcept {
     switch (kind) {
     case TokenKind::or_or: return 1;

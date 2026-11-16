@@ -14,6 +14,9 @@
 
 namespace {
 
+/**
+ * @brief Prints the CLI usage instructions to stderr.
+ */
 void usage() {
     std::cerr << "wgslcheck " << wgslcheck::version()
               << " - WGSL static checker and CPU simulator\n\n"
@@ -24,6 +27,11 @@ void usage() {
               << "  wgslcheck --help\n";
 }
 
+/**
+ * @brief Formats and prints diagnostics (errors and warnings) to stderr.
+ * Uses the standard `file:line:column: severity: message` format, which is
+ * directly clickable in most IDEs and CI systems.
+ */
 void print_diagnostics(const std::string& path,
                        const std::vector<wgslcheck::Diagnostic>& diagnostics) {
     for (const auto& diagnostic : diagnostics) {
@@ -35,13 +43,23 @@ void print_diagnostics(const std::string& path,
     }
 }
 
+/**
+ * @brief Parses a positive integer from a string_view.
+ * Used for parsing CLI arguments like the --dispatch dimensions.
+ */
 bool parse_positive(std::string_view text, unsigned& value) {
     const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
     return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() && value > 0;
 }
 
+/**
+ * @brief The core pipeline: Read -> Lex -> Parse -> Analyze -> Simulate.
+ * @return Exit code (0 = success, 2 = processing error).
+ */
 int run(const std::string& command, const std::string& path,
         const wgslcheck::SimulationOptions& simulation_options) {
+    
+    // 1. Read the file
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         std::cerr << "error: cannot open '" << path << "'\n";
@@ -54,43 +72,58 @@ int run(const std::string& command, const std::string& path,
         return 2;
     }
 
+    // 2. Lexing
     wgslcheck::Lexer lexer(source);
     auto tokens = lexer.tokenize();
     const auto lexer_diagnostics = lexer.diagnostics();
+    
+    // 3. Parsing
     wgslcheck::Parser parser(std::move(tokens));
     auto module = parser.parse();
+    
+    // Combine lexer and parser diagnostics
     std::vector<wgslcheck::Diagnostic> diagnostics = lexer_diagnostics;
     diagnostics.insert(diagnostics.end(), parser.diagnostics().begin(),
                        parser.diagnostics().end());
+                       
     if (wgslcheck::has_errors(diagnostics)) {
         print_diagnostics(path, diagnostics);
         return 2;
     }
 
+    // 4. Semantic Analysis
     wgslcheck::Analyzer analyzer;
     auto analysis = analyzer.analyze(module);
     if (!analysis.ok()) {
         print_diagnostics(path, analysis.diagnostics);
         return 2;
     }
+    
+    // If we are just checking, we're done!
     if (command == "check") {
         std::cout << path << ": no issues found (" << module.functions.size()
                   << " function(s) checked)\n";
         return 0;
     }
 
+    // 5. Simulation
     wgslcheck::Simulator simulator;
     auto simulation = simulator.run(module, simulation_options);
     if (!simulation.ok()) {
         print_diagnostics(path, simulation.diagnostics);
         return 2;
     }
+    
     for (const auto& line : simulation.output) std::cout << line << '\n';
     return 0;
 }
 
 } // namespace
 
+/**
+ * @brief Entry point for the CLI.
+ * Dispatches the command based on the first argument and parses options.
+ */
 int main(int argc, char** argv) {
     if (argc < 2) {
         usage();
@@ -98,6 +131,8 @@ int main(int argc, char** argv) {
     }
 
     const std::string_view arg = argv[1];
+    
+    // Global flags
     if (arg == "--version") {
         std::cout << "wgslcheck " << wgslcheck::version() << '\n';
         return 0;
@@ -106,6 +141,8 @@ int main(int argc, char** argv) {
         usage();
         return 0;
     }
+    
+    // Subcommand validation
     if (arg != "check" && arg != "sim") {
         std::cerr << "error: unknown command '" << argv[1] << "'\n";
         usage();
@@ -117,6 +154,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Parse simulation options (only applicable to the `sim` command)
     wgslcheck::SimulationOptions options;
     for (int index = 3; index < argc; ++index) {
         const std::string_view option = argv[index];
@@ -146,5 +184,6 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    
     return run(std::string(arg), argv[2], options);
 }

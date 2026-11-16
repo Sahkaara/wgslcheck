@@ -9,6 +9,10 @@
 namespace wgslcheck {
 namespace {
 
+/**
+ * @brief Utility to find an attribute by name in a function's attribute list.
+ * @return Pointer to the attribute if found, nullptr otherwise.
+ */
 const Attribute* find_attribute(const Function& function, const std::string& name) {
     for (const auto& attribute : function.attributes) {
         if (attribute.name == name) return &attribute;
@@ -16,29 +20,48 @@ const Attribute* find_attribute(const Function& function, const std::string& nam
     return nullptr;
 }
 
+/**
+ * @brief Parses a positive integer literal (e.g., "42", "0x1A", "10u").
+ * @param text The raw literal string.
+ * @param value Output parameter for the parsed value.
+ * @return true if the string is a valid positive integer, false otherwise.
+ */
 bool parse_positive_integer(std::string text, std::uint32_t& value) {
+    // Strip WGSL integer suffixes (e.g., 'u' for unsigned, 'i' for signed)
     while (!text.empty() && (text.back() == 'u' || text.back() == 'i')) {
         text.pop_back();
     }
     if (text.empty()) return false;
+    
     int base = 10;
     const char* begin = text.data();
+    
+    // Handle hexadecimal literals
     if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
         base = 16;
         begin += 2;
     }
+    
     const auto result = std::from_chars(begin, text.data() + text.size(), value, base);
     return result.ec == std::errc{} && result.ptr == text.data() + text.size() && value > 0;
 }
 
+/**
+ * @brief Appends an error diagnostic to the analysis result.
+ */
 void add_error(AnalysisResult& result, std::string message, SourceLocation location) {
     result.diagnostics.push_back({DiagnosticSeverity::error, std::move(message), location});
 }
 
+// Forward declaration for recursive traversal.
 void analyze_block(const Statement& block,
                    std::unordered_map<std::string, bool> variables,
                    AnalysisResult& result);
 
+/**
+ * @brief Analyzes a statement that creates a new lexical scope (like `if` or `else`).
+ * Variables declared inside the branch should not leak into the outer scope.
+ */
 void analyze_scoped_statement(const Statement& statement,
                               const std::unordered_map<std::string, bool>& variables,
                               AnalysisResult& result) {
@@ -54,20 +77,30 @@ void analyze_scoped_statement(const Statement& statement,
     }
 }
 
+/**
+ * @brief Recursively analyzes a block of statements.
+ * @param variables A map of variable names to a boolean indicating mutability 
+ * (true = immutable, false = mutable).
+ */
 void analyze_block(const Statement& block,
                    std::unordered_map<std::string, bool> variables,
                    AnalysisResult& result) {
     std::unordered_set<std::string> declared_here;
+    
     for (const auto& statement : block.statements) {
         if (statement->kind == Statement::Kind::variable) {
+            // Check for duplicate declarations in the same scope
             if (!declared_here.insert(statement->name).second) {
                 add_error(result, "duplicate local variable '" + statement->name + "'",
                           statement->span.start);
             }
+            // Track if the variable is immutable (let) or mutable (var)
             variables[statement->name] = !statement->mutable_variable;
+            
         } else if (statement->kind == Statement::Kind::assignment &&
                    statement->expression &&
                    statement->expression->kind == Expression::Kind::identifier) {
+            // Check for assignment to immutable values (let)
             const auto variable = variables.find(statement->expression->text);
             if (variable != variables.end() && variable->second) {
                 add_error(result, "cannot assign to immutable value '" +
@@ -83,17 +116,22 @@ void analyze_block(const Statement& block,
 
 } // namespace
 
+/**
+ * @brief Performs semantic analysis on the entire module.
+ */
 AnalysisResult Analyzer::analyze(const Module& module) const {
     AnalysisResult result;
     std::unordered_map<std::string, SourceLocation> function_names;
 
     for (const auto& function : module.functions) {
+        // 1. Check for duplicate function names
         const auto inserted = function_names.emplace(function.name, function.span.start);
         if (!inserted.second) {
             add_error(result, "duplicate function '" + function.name + "'",
                       function.span.start);
         }
 
+        // 2. Check for duplicate function attributes
         std::unordered_set<std::string> attributes;
         for (const auto& item : function.attributes) {
             if (!attributes.insert(item.name).second) {
@@ -101,6 +139,8 @@ AnalysisResult Analyzer::analyze(const Module& module) const {
                           item.span.start);
             }
         }
+        
+        // 3. Check parameters
         std::unordered_set<std::string> parameters;
         for (const auto& parameter : function.parameters) {
             if (!parameters.insert(parameter.name).second) {
@@ -115,26 +155,32 @@ AnalysisResult Analyzer::analyze(const Module& module) const {
                 }
             }
         }
+        
+        // 4. Analyze the function body
         if (function.body) {
             std::unordered_map<std::string, bool> variables;
+            // Parameters are immutable by default
             for (const auto& function_parameter : function.parameters) {
                 variables[function_parameter.name] = true;
             }
             analyze_block(*function.body, std::move(variables), result);
         }
 
+        // 5. Validate shader-stage attributes
         const bool compute = find_attribute(function, "compute") != nullptr;
         const bool vertex = find_attribute(function, "vertex") != nullptr;
         const bool fragment = find_attribute(function, "fragment") != nullptr;
         const unsigned stage_count = static_cast<unsigned>(compute) +
                                      static_cast<unsigned>(vertex) +
                                      static_cast<unsigned>(fragment);
+                                     
         if (stage_count > 1) {
             add_error(result, "a function cannot have more than one shader-stage attribute",
                       function.span.start);
         }
-        if (stage_count == 0) continue;
+        if (stage_count == 0) continue; // Not an entry point, skip further checks
 
+        // 6. Validate @workgroup_size for compute shaders
         const Attribute* workgroup = find_attribute(function, "workgroup_size");
         if (compute && workgroup == nullptr) {
             add_error(result, "compute entry point requires @workgroup_size",
@@ -148,6 +194,7 @@ AnalysisResult Analyzer::analyze(const Module& module) const {
                           workgroup->span.start);
                 continue;
             }
+            
             std::uint64_t product = 1;
             for (const auto& argument : workgroup->arguments) {
                 std::uint32_t dimension = 0;
@@ -163,6 +210,8 @@ AnalysisResult Analyzer::analyze(const Module& module) const {
                 }
                 product *= dimension;
             }
+            
+            // WGSL spec: Max 256 invocations per workgroup
             if (product > 256) {
                 add_error(result, "total workgroup size cannot exceed 256 invocations",
                           workgroup->span.start);

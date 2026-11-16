@@ -6,6 +6,10 @@
 namespace wgslcheck {
 namespace {
 
+// --- Character Classification Helpers ---
+// These inline helpers avoid the overhead of locale-dependent <cctype> functions
+// and strictly adhere to the ASCII ranges allowed in WGSL identifiers.
+
 bool is_identifier_start(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
@@ -23,6 +27,11 @@ bool is_hex_digit(char c) {
 
 Lexer::Lexer(std::string_view source) : source_(source) {}
 
+/**
+ * @brief Main entry point for tokenization.
+ * Iterates through the source until EOF, skipping whitespace/comments and 
+ * extracting tokens one by one.
+ */
 std::vector<Token> Lexer::tokenize() {
     while (!at_end()) {
         skip_trivia();
@@ -33,6 +42,7 @@ std::vector<Token> Lexer::tokenize() {
         scan_token();
     }
 
+    // Append EOF token to signal the parser that the stream is complete.
     SourceLocation end{offset_, line_, column_};
     tokens_.push_back({TokenKind::end_of_file, {}, {end, end}});
     return std::move(tokens_);
@@ -46,11 +56,20 @@ bool Lexer::at_end() const noexcept {
     return offset_ >= source_.size();
 }
 
+/**
+ * @brief Peeks at a character without advancing the lexer.
+ * @param lookahead Number of characters to look ahead (0 = current, 1 = next).
+ * @return The character, or '\0' if out of bounds.
+ */
 char Lexer::peek(std::size_t lookahead) const noexcept {
     const std::size_t index = offset_ + lookahead;
     return index < source_.size() ? source_[index] : '\0';
 }
 
+/**
+ * @brief Consumes the current character and advances the position.
+ * Automatically tracks line and column numbers for diagnostics.
+ */
 char Lexer::advance() noexcept {
     if (at_end()) {
         return '\0';
@@ -65,6 +84,10 @@ char Lexer::advance() noexcept {
     return c;
 }
 
+/**
+ * @brief Conditionally consumes the next character if it matches `expected`.
+ * Useful for parsing multi-character operators (e.g., '==' or '<=').
+ */
 bool Lexer::match(char expected) noexcept {
     if (peek() != expected) {
         return false;
@@ -73,18 +96,24 @@ bool Lexer::match(char expected) noexcept {
     return true;
 }
 
+/**
+ * @brief Skips whitespace, line comments, and block comments.
+ * Note: WGSL (and this lexer) supports *nested* block comments.
+ */
 void Lexer::skip_trivia() {
     for (;;) {
         if (peek() == ' ' || peek() == '\r' || peek() == '\t' || peek() == '\n') {
             advance();
             continue;
         }
+        // Line comment: skip until newline
         if (peek() == '/' && peek(1) == '/') {
             while (!at_end() && peek() != '\n') {
                 advance();
             }
             continue;
         }
+        // Block comment: handle nested /* ... */ correctly
         if (peek() == '/' && peek(1) == '*') {
             const SourceLocation start{offset_, line_, column_};
             advance();
@@ -112,6 +141,11 @@ void Lexer::skip_trivia() {
     }
 }
 
+/**
+ * @brief Scans the next token and adds it to the token list.
+ * Dispatches to specific scanners for identifiers and numbers, and uses
+ * a switch statement for punctuation and operators.
+ */
 void Lexer::scan_token() {
     const char c = advance();
     if (is_identifier_start(c)) {
@@ -176,6 +210,10 @@ void Lexer::scan_identifier() {
     add_token(TokenKind::identifier);
 }
 
+/**
+ * @brief Scans numeric literals (integers, floats, hex, scientific notation).
+ * WGSL has specific suffixes for numbers (e.g., 'u' for unsigned, 'f' for float).
+ */
 void Lexer::scan_number() {
     bool floating = false;
     const bool hexadecimal = source_[token_start_.offset] == '0' &&
@@ -189,6 +227,7 @@ void Lexer::scan_number() {
         if (digits_start == offset_) {
             report("expected hexadecimal digits after 0x", token_start_);
         }
+        // Consume integer type suffixes (i or u)
         while (peek() == 'i' || peek() == 'u') {
             advance();
         }
@@ -196,6 +235,7 @@ void Lexer::scan_number() {
         while (peek() >= '0' && peek() <= '9') {
             advance();
         }
+        // Check for fractional part (must be followed by a digit, e.g., "1.5")
         if (peek() == '.' && peek(1) >= '0' && peek(1) <= '9') {
             floating = true;
             advance();
@@ -203,6 +243,7 @@ void Lexer::scan_number() {
                 advance();
             }
         }
+        // Check for scientific exponent (e.g., "1e10", "2.5e-3")
         if (peek() == 'e' || peek() == 'E') {
             floating = true;
             advance();
@@ -217,6 +258,7 @@ void Lexer::scan_number() {
                 report("expected digits in numeric exponent", token_start_);
             }
         }
+        // Consume literal suffixes
         if (peek() == 'f' || peek() == 'h') {
             floating = true;
             advance();
@@ -227,6 +269,9 @@ void Lexer::scan_number() {
     add_token(floating ? TokenKind::float_literal : TokenKind::integer_literal);
 }
 
+/**
+ * @brief Constructs the token from the current lexeme and span, then appends it to the list.
+ */
 void Lexer::add_token(TokenKind kind) {
     const SourceLocation end{offset_, line_, column_};
     tokens_.push_back({kind,
@@ -238,6 +283,10 @@ void Lexer::report(std::string message, SourceLocation location) {
     diagnostics_.push_back({DiagnosticSeverity::error, std::move(message), location});
 }
 
+/**
+ * @brief Maps a TokenKind enum to a human-readable string.
+ * This is essential for generating meaningful syntax error messages in the Parser.
+ */
 const char* token_kind_name(TokenKind kind) noexcept {
     switch (kind) {
     case TokenKind::end_of_file: return "end of file";

@@ -14,12 +14,17 @@
 namespace wgslcheck {
 namespace {
 
+/**
+ * @brief Represents a runtime value in the simulator.
+ * WGSL has a complex type system (scalars, vectors, matrices), but for
+ * a CPU debugger, a simplified tagged union is sufficient.
+ */
 struct Value {
     enum class Kind { number, boolean, vector };
     Kind kind = Kind::number;
     double number = 0.0;
     bool boolean = false;
-    std::vector<double> components;
+    std::vector<double> components; ///< Used for vec2, vec3, vec4
 
     static Value scalar(double value) {
         Value result;
@@ -42,10 +47,17 @@ struct Value {
     }
 };
 
+/**
+ * @brief Exception used to unwind the stack when a `return` statement is hit.
+ * This is a common technique in tree-walking interpreters to handle control flow.
+ */
 struct ReturnSignal {
     Value value;
 };
 
+/**
+ * @brief Parses an integer literal from a string, respecting WGSL suffixes.
+ */
 bool parse_integer(std::string text, unsigned& result) {
     while (!text.empty() && (text.back() == 'u' || text.back() == 'i')) {
         text.pop_back();
@@ -61,12 +73,18 @@ bool parse_integer(std::string text, unsigned& result) {
     return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() && result > 0;
 }
 
+/**
+ * @brief Evaluates the "truthiness" of a Value.
+ */
 bool truthy(const Value& value) {
     if (value.kind == Value::Kind::boolean) return value.boolean;
     if (value.kind == Value::Kind::number) return value.number != 0.0;
     return !value.components.empty();
 }
 
+/**
+ * @brief The core tree-walking interpreter for WGSL compute shaders.
+ */
 class Interpreter {
 public:
     Interpreter(const Module& module, SimulationResult& result)
@@ -76,11 +94,18 @@ public:
         }
     }
 
+    /**
+     * @brief Invokes a single shader function for a given global/local ID.
+     * This is called in a loop for every invocation in the dispatch grid.
+     */
     void invoke(const Function& function, const std::array<unsigned, 3>& group,
                 const std::array<unsigned, 3>& local,
                 const std::array<unsigned, 3>& dispatch,
                 const std::array<unsigned, 3>& workgroup_size) {
+        
         std::unordered_map<std::string, Value> environment;
+        
+        // Calculate built-in IDs
         const std::array<unsigned, 3> global{
             group[0] * workgroup_size[0] + local[0],
             group[1] * workgroup_size[1] + local[1],
@@ -92,6 +117,8 @@ public:
             if (!function.body) {
                 fail("compute entry point has no function body", function.span.start);
             }
+            
+            // Bind parameters (e.g., @builtin(global_invocation_id))
             for (const auto& parameter : function.parameters) {
                 const Attribute* builtin = nullptr;
                 for (const auto& attribute : parameter.attributes) {
@@ -124,12 +151,17 @@ public:
 
             execute_block(*function.body, environment, 0);
         } catch (const ReturnSignal&) {
+            // Normal return from entry point: ignore value.
         } catch (const RuntimeFailure&) {
+            // Error already recorded in result_.diagnostics.
             return;
         }
     }
 
 private:
+    /**
+     * @brief Internal exception used to halt execution upon a fatal runtime error.
+     */
     struct RuntimeFailure {};
 
     static Value vector(const std::array<unsigned, 3>& values) {
@@ -168,12 +200,16 @@ private:
         }
     }
 
+    /**
+     * @brief Evaluates an expression to a runtime Value.
+     */
     Value evaluate(const Expression& expression,
                    std::unordered_map<std::string, Value>& environment,
                    unsigned call_depth) {
         switch (expression.kind) {
         case Expression::Kind::number: {
             std::string literal = expression.text;
+            // Strip type suffixes (u, i, f, h) before parsing
             while (!literal.empty() && (literal.back() == 'u' || literal.back() == 'i' ||
                                         literal.back() == 'f' || literal.back() == 'h')) {
                 literal.pop_back();
@@ -207,6 +243,7 @@ private:
             if (base.kind != Value::Kind::vector) {
                 fail("member access is only supported on vectors", expression.span.start);
             }
+            // Support both spatial (x,y,z) and color (r,g,b) swizzles
             const std::string_view member = expression.text;
             const std::size_t index = member == "x" || member == "r" ? 0 :
                                       member == "y" || member == "g" ? 1 :
@@ -231,11 +268,15 @@ private:
         }
         case Expression::Kind::binary: {
             const Value left = evaluate(*expression.children[0], environment, call_depth);
+            
+            // Short-circuit evaluation for logical operators
             if (expression.text == "&&" && !truthy(left)) return Value::boolean_value(false);
             if (expression.text == "||" && truthy(left)) return Value::boolean_value(true);
+            
             const Value right = evaluate(*expression.children[1], environment, call_depth);
             if (expression.text == "&&") return Value::boolean_value(truthy(right));
             if (expression.text == "||") return Value::boolean_value(truthy(right));
+            
             if (expression.text == "==" || expression.text == "!=") {
                 bool equal = false;
                 if (left.kind == Value::Kind::boolean && right.kind == Value::Kind::boolean) {
@@ -248,8 +289,10 @@ private:
                 }
                 return Value::boolean_value(expression.text == "==" ? equal : !equal);
             }
+            
             const double a = number(left, expression.span.start);
             const double b = number(right, expression.span.start);
+            
             if (expression.text == "+") return Value::scalar(a + b);
             if (expression.text == "-") return Value::scalar(a - b);
             if (expression.text == "*") return Value::scalar(a * b);
@@ -265,6 +308,8 @@ private:
             if (expression.text == "<=") return Value::boolean_value(a <= b);
             if (expression.text == ">") return Value::boolean_value(a > b);
             if (expression.text == ">=") return Value::boolean_value(a >= b);
+            
+            // Bitwise operations
             if (expression.text == "&") return Value::scalar(static_cast<double>(
                 integer(a, expression.span.start) & integer(b, expression.span.start)));
             if (expression.text == "|") return Value::scalar(static_cast<double>(
@@ -276,6 +321,7 @@ private:
                 if (shift < 0 || shift >= 64) {
                     fail("shift amount must be between 0 and 63", expression.span.start);
                 }
+                // Use uint64_t to prevent undefined behavior in C++ shifts
                 const auto operand = static_cast<std::uint64_t>(integer(a, expression.span.start));
                 const auto shifted = expression.text == "<<"
                     ? operand << shift : operand >> shift;
@@ -289,6 +335,9 @@ private:
         fail("unsupported expression", expression.span.start);
     }
 
+    /**
+     * @brief Handles function calls (both built-ins and user-defined functions).
+     */
     Value call(const Expression& expression,
                std::unordered_map<std::string, Value>& environment,
                unsigned call_depth) {
@@ -301,6 +350,8 @@ private:
         for (std::size_t i = 1; i < expression.children.size(); ++i) {
             arguments.push_back(evaluate(*expression.children[i], environment, call_depth));
         }
+        
+        // --- 1. Built-in type constructors ---
         if (name == "u32" || name == "i32" || name == "f32" ||
             name == "f16" || name == "bool") {
             if (arguments.size() != 1) fail("scalar conversion expects one argument", expression.span.start);
@@ -319,6 +370,7 @@ private:
                     components.push_back(number(argument, expression.span.start));
                 }
             }
+            // Splat behavior: vec3(1.0) -> vec3<f32>(1.0, 1.0, 1.0)
             if (components.size() == 1) components.resize(width, components.front());
             if (components.size() != width) {
                 fail("vector constructor has the wrong number of components",
@@ -326,6 +378,8 @@ private:
             }
             return Value::vector_value(std::move(components));
         }
+        
+        // --- 2. Built-in math functions ---
         if (name == "min" || name == "max") {
             if (arguments.size() != 2) fail(name + " expects two arguments", expression.span.start);
             const double a = number(arguments[0], expression.span.start);
@@ -342,6 +396,7 @@ private:
             return Value::scalar(std::ceil(n));
         }
 
+        // --- 3. User-defined functions ---
         const auto function = functions_.find(name);
         if (function == functions_.end()) {
             fail("unsupported function call '" + name + "'", expression.span.start);
@@ -351,6 +406,7 @@ private:
         if (arguments.size() != target.parameters.size()) {
             fail("wrong number of arguments for function '" + name + "'", expression.span.start);
         }
+        
         std::unordered_map<std::string, Value> locals;
         std::vector<std::string> immutable_parameters;
         for (std::size_t i = 0; i < arguments.size(); ++i) {
@@ -358,6 +414,7 @@ private:
             mark_immutable(target.parameters[i].name);
             immutable_parameters.push_back(target.parameters[i].name);
         }
+        
         try {
             execute_block(*target.body, locals, call_depth + 1);
         } catch (const ReturnSignal& returned) {
@@ -368,15 +425,21 @@ private:
             throw;
         }
         for (const auto& parameter : immutable_parameters) release_immutable(parameter);
-        return Value::scalar(0.0);
+        return Value::scalar(0.0); // Default return if no `return` statement
     }
 
+    /**
+     * @brief Executes a block of statements.
+     * Handles variable scoping by tracking declarations and cleaning up 
+     * the environment when the block exits (including via exceptions).
+     */
     void execute_block(const Statement& block,
                        std::unordered_map<std::string, Value>& environment,
                        unsigned call_depth) {
         std::vector<std::string> declared;
         try {
             for (const auto& statement : block.statements) {
+                // 1. Variable declarations
                 if (statement->kind == Statement::Kind::variable) {
                     if (environment.count(statement->name) != 0) {
                         fail("variable '" + statement->name + "' is already declared",
@@ -392,6 +455,8 @@ private:
                     if (!statement->mutable_variable) mark_immutable(statement->name);
                     continue;
                 }
+                
+                // 2. Assignments
                 if (statement->kind == Statement::Kind::assignment) {
                     if (!statement->expression ||
                         statement->expression->kind != Expression::Kind::identifier ||
@@ -408,13 +473,16 @@ private:
                     }
                     const Value right = evaluate(*statement->expression->children.front(),
                                                  environment, call_depth);
+                                                 
                     if (statement->operation == "=") {
                         target->second = right;
                     } else {
+                        // Compound assignment (e.g., +=, -=)
                         const double left_number = number(target->second, statement->span.start);
                         const double right_number = number(right, statement->span.start);
                         const std::string operation = statement->operation.substr(
                             0, statement->operation.size() - 1);
+                            
                         if (operation == "+") target->second = Value::scalar(left_number + right_number);
                         else if (operation == "-") target->second = Value::scalar(left_number - right_number);
                         else if (operation == "*") target->second = Value::scalar(left_number * right_number);
@@ -453,11 +521,15 @@ private:
                     }
                     continue;
                 }
+                
+                // 3. Return statements
                 if (statement->kind == Statement::Kind::return_statement) {
                     throw ReturnSignal{statement->expression
                         ? evaluate(*statement->expression, environment, call_depth)
                         : Value::scalar(0.0)};
                 }
+                
+                // 4. If statements
                 if (statement->kind == Statement::Kind::if_statement) {
                     const bool condition = truthy(evaluate(*statement->expression,
                                                            environment, call_depth));
@@ -466,27 +538,35 @@ private:
                     if (branch != nullptr) execute_block(*branch, environment, call_depth);
                     continue;
                 }
+                
+                // 5. Nested blocks
                 if (statement->kind == Statement::Kind::block) {
                     execute_block(*statement, environment, call_depth);
                     continue;
                 }
+                
+                // 6. Expression statements (e.g., a function call)
                 if (statement->expression) {
                     (void)evaluate(*statement->expression, environment, call_depth);
                 }
             }
         } catch (const ReturnSignal&) {
+            // Cleanup scope before propagating the return signal
             for (const auto& name : declared) {
                 environment.erase(name);
                 release_immutable(name);
             }
             throw;
         } catch (const RuntimeFailure&) {
+            // Cleanup scope before propagating the runtime error
             for (const auto& name : declared) {
                 environment.erase(name);
                 release_immutable(name);
             }
             throw;
         }
+        
+        // Cleanup scope on normal block exit
         for (const auto& name : declared) {
             environment.erase(name);
             release_immutable(name);
@@ -511,8 +591,14 @@ void add_error(SimulationResult& result, std::string message, SourceLocation loc
 
 } // namespace
 
+/**
+ * @brief Main simulation driver.
+ * Validates workgroup sizes and limits, then loops over the 3D dispatch grid.
+ */
 SimulationResult Simulator::run(const Module& module, const SimulationOptions& options) const {
     SimulationResult result;
+    
+    // 1. Find the compute entry point
     const Function* entry = nullptr;
     for (const auto& function : module.functions) {
         if (attribute(function, "compute") == nullptr) continue;
@@ -529,6 +615,7 @@ SimulationResult Simulator::run(const Module& module, const SimulationOptions& o
         return result;
     }
 
+    // 2. Parse and validate @workgroup_size
     const Attribute* workgroup = attribute(*entry, "workgroup_size");
     if (workgroup == nullptr || workgroup->arguments.empty() ||
         workgroup->arguments.size() > 3) {
@@ -557,6 +644,7 @@ SimulationResult Simulator::run(const Module& module, const SimulationOptions& o
         return result;
     }
 
+    // 3. Validate dispatch grid and total invocations limit
     std::uint64_t total = 1;
     for (unsigned value : options.workgroups) {
         if (value == 0 || total > options.max_invocations / value) {
@@ -573,6 +661,7 @@ SimulationResult Simulator::run(const Module& module, const SimulationOptions& o
         total *= value;
     }
 
+    // 4. Execute the shader
     Interpreter interpreter(module, result);
     for (unsigned gz = 0; gz < options.workgroups[2]; ++gz) {
         for (unsigned gy = 0; gy < options.workgroups[1]; ++gy) {
@@ -584,6 +673,7 @@ SimulationResult Simulator::run(const Module& module, const SimulationOptions& o
                             const std::array<unsigned, 3> local{lx, ly, lz};
                             interpreter.invoke(*entry, group, local,
                                                options.workgroups, size);
+                            // Stop execution immediately if a runtime error occurred
                             if (has_errors(result.diagnostics)) return result;
                         }
                     }
@@ -591,6 +681,8 @@ SimulationResult Simulator::run(const Module& module, const SimulationOptions& o
             }
         }
     }
+    
+    // 5. Generate summary output
     std::ostringstream summary;
     summary << "Executed " << total << " invocation(s) of '" << entry->name
             << "' (workgroup_size=" << size[0] << 'x' << size[1] << 'x' << size[2]
