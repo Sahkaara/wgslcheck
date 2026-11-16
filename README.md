@@ -1,261 +1,102 @@
 # wgslcheck
 
-**A static analyzer and CPU-side debugger for WGSL compute shaders — CLI-first, cross-backend, zero-dependency.**
+A dependency-free C++20 command-line checker and CPU simulator for a **subset** of WGSL compute shaders. No browser, GPU or driver is required.
 
-[![CI](https://github.com/Sahkaara/wgslcheck/actions/workflows/ci.yml/badge.svg)](https://github.com/Sahkaara/wgslcheck/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
+This is not a complete WGSL validator or a GPU conformance implementation. A successful `check` means that the implemented checks passed, not that every WGSL rule was verified.
 
-`wgslcheck` is a portable C++20 tool for debugging WGSL compute shaders **outside the browser**. Unlike RenderDoc or browser extensions, it runs anywhere — Linux, macOS, Windows, CI pipelines — without requiring a GPU.
+## Build and test
 
-## What it does
+Requires CMake 3.20 or newer and a C++20 compiler.
 
-- **`check`** — parse a WGSL file and run static checks, reporting issues with line/column in GNU format (`file:line:column: severity: message`)
-- **`sim`** — execute a compute shader on the CPU, with configurable `--entry` and `--dispatch`; useful for reproducing bugs, testing kernels without a GPU, and validating logic in CI
-
-Both subcommands work headlessly: no browser, no driver, no GPU.
-
-## Status
-
-**v0.1.0 — usable.** Lexer, parser, analyzer, and CPU simulator are implemented.
-
-- [x] WGSL lexer
-- [x] WGSL parser (subset: functions, attributes, primitives, control flow)
-- [x] Static analyzer (`check`)
-- [x] CPU simulator (`sim` with `--entry` and `--dispatch`)
-- [x] `--version` and `--help`
-- [ ] Concurrent workgroup simulation (single workgroup at a time for now)
-- [ ] JSON output for CI integration
-
-See [`docs/architecture.md`](docs/architecture.md) for the internals.
-
-## Quick start
-
-**Requirements:** a C++20 compiler (`g++`, `clang++`, `cl.exe`) and CMake ≥ 3.20.
-
-```bash
-git clone https://github.com/Sahkaara/wgslcheck.git
-cd wgslcheck
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-./build/wgslcheck --version
-```
-
-You should see:
-
-```
-wgslcheck 0.1.0
-```
-
-## CLI usage
-
-```
-wgslcheck <command> [options] <file.wgsl>
-
-Commands:
-  check <file.wgsl>                              Run static checks
-  sim   <file.wgsl> [--entry NAME] [--dispatch X Y Z]   Execute on the CPU
-  --version                                      Print version
-  --help                                         Show this message
-```
-
-Exit codes:
-
-| Command | 0 | 1 | 2 |
-|---|---|---|---|
-| `check` | no issues found | I/O or usage error | parse error or analysis error |
-| `sim` | executed successfully | I/O or usage error | parse or simulation error |
-
-### `wgslcheck check`
-
-Parses the file and runs static checks. Silent on success.
-
-```bash
-$ ./wgslcheck check examples/sample.wgsl
-examples/sample.wgsl: no issues found (1 function(s) checked)
-exit: 0
-```
-
-On error:
-
-```
-examples/bad.wgsl:12:5: error: unknown function 'undefined_function'
-```
-
-### `wgslcheck sim`
-
-Executes a compute shader on the CPU. The default entry point is `main`; the default dispatch is `1 1 1`.
-
-```bash
-$ ./wgslcheck sim examples/sample.wgsl
-Executed 8 invocation(s) of 'main' (workgroup_size=8x1x1, dispatch=1x1x1)
-exit: 0
-
-$ ./wgslcheck sim examples/sample.wgsl --dispatch 4 1 1
-Executed 32 invocation(s) of 'main' (workgroup_size=8x1x1, dispatch=4x1x1)
-exit: 0
-
-$ ./wgslcheck sim examples/sample.wgsl --entry my_kernel --dispatch 2 2 1
-Executed 8 invocation(s) of 'my_kernel' (workgroup_size=8x1x1, dispatch=2x2x1)
-```
-
-The simulator is **single-workgroup per invocation**: each workgroup runs independently on the CPU. Concurrent simulation of multiple workgroups (to expose data races) is on the roadmap.
-
-## Architecture
-
-```
-wgslcheck/
-├── include/wgslcheck/   # Public headers
-│   ├── ast.hpp          # AST node types
-│   ├── diagnostic.hpp   # Diagnostic struct (severity, line, column, message)
-│   ├── lexer.hpp        # Tokenizer interface
-│   ├── parser.hpp       # Recursive-descent parser
-│   ├── analyzer.hpp     # Static checks on the AST
-│   └── simulator.hpp    # CPU-side execution
-├── src/                 # Implementation
-│   ├── lexer.cpp
-│   ├── parser.cpp
-│   ├── analyzer.cpp
-│   ├── simulator.cpp
-│   └── main.cpp         # CLI (subcommand dispatch)
-├── examples/
-│   └── sample.wgsl      # Minimal compute shader used in docs and tests
-├── tests/
-│   └── test_basic.sh    # Smoke tests for the CLI
-└── docs/
-    └── architecture.md
-```
-
-**Design principles:**
-
-- **Zero dependencies.** Just the C++ standard library.
-- **Single binary.** No shared libraries, no runtime, no config files.
-- **Headless.** No GPU, no browser, no driver.
-- **CLI-first.** Every feature is available from the command line, ready for CI.
-- **Honest scope.** The parser supports a subset of WGSL, documented below. Unsupported constructs produce clear errors, not silent failures.
-
-## Supported WGSL subset
-
-`wgslcheck` implements a practical subset of WGSL — enough for real compute kernels, not the full language spec.
-
-| Feature | Supported | Notes |
-|---|:---:|---|
-| Functions (`fn`) | ✅ | Entry points and helpers |
-| Attributes (`@compute`, `@workgroup_size`, `@builtin`, `@group`, `@binding`) | ✅ | |
-| Primitive types (`u32`, `i32`, `f32`, `bool`) | ✅ | |
-| Vector types (`vec2`, `vec3`, `vec4`) | ✅ | |
-| Control flow (`if`, `else`, `loop`, `break`, `continue`, `return`) | ✅ | |
-| Variable declarations (`var`, `let`) | ✅ | |
-| Binary operators (`+`, `-`, `*`, `/`, `%`, comparisons) | ✅ | |
-| Structs | ✅ | Parsed as AST nodes (instantiation planned) |
-| **Storage/texture bindings** | ❌ | Planned (parser accepts, simulator does not) |
-| **Swizzles** (`vec.xyz`) | ❌ | Planned |
-| **Built-in functions** (`dot`, `cross`, `length`, ...) | ❌ | Planned |
-| **Workgroup shared memory** (`var<workgroup>`) | ❌ | Planned |
-| **Barriers** (`workgroupBarrier()`) | ❌ | Planned |
-
-If you need one of the ❌ features, please [open an issue](https://github.com/Sahkaara/wgslcheck/issues).
-
-## Building from source
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-```
-
-Override the compiler:
-
-```bash
-CXX=clang++ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-```
-
-### Windows
-
-```powershell
+```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
-.\build\Release\wgslcheck.exe --version
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-## Testing
+On Linux/macOS, the executable is normally `build/wgslcheck`. With Visual Studio on Windows it is `build/Release/wgslcheck.exe`.
 
-```bash
-bash tests/test_basic.sh
+The repository also provides `bash tests/test_basic.sh` as a convenience wrapper. CI builds and runs CTest on Linux, Windows and macOS. There is no automatic golden-file test discovery.
+
+## Commands
+
+```text
+wgslcheck check <file.wgsl>
+wgslcheck sim <file.wgsl> [--entry NAME] [--dispatch X Y Z]
+wgslcheck --version
+wgslcheck --help
 ```
 
-The smoke suite covers:
+Each command accepts one input file. `sim` defaults to entry point `main` and dispatch `1 1 1`. Dispatch dimensions must be positive integers.
 
-- `--version` and `--help` output
-- `check` on a valid file (exit 0) and on an invalid one (exit 2)
-- `sim` with default dispatch and with `--dispatch`
-- exit codes for usage errors
+```sh
+./build/wgslcheck check examples/sample.wgsl
+# examples/sample.wgsl: no issues found (1 function(s) checked)
 
-Golden-file tests live in `tests/cases/` — drop a `foo.wgsl` and its expected `foo.expected` and the suite picks it up automatically.
-
-## CI integration
-
-Add `.github/workflows/ci.yml` (already present in this repo):
-
-```yaml
-name: CI
-on: [push, pull_request]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        run: cmake --build build
-      - name: Test
-        run: bash tests/test_basic.sh
+./build/wgslcheck sim examples/sample.wgsl --dispatch 2 2 1
+# Executed 32 invocation(s) of 'main' (workgroup_size=8x1x1, dispatch=2x2x1)
 ```
 
-Use it in a pipeline:
+Diagnostics use `file:line:column: severity: message`. `check` prints a summary on success.
 
-```yaml
-- name: Check shaders
-  run: ./build/wgslcheck check shaders/*.wgsl
+| Exit code | Meaning |
+|---|---|
+| 0 | Command succeeded |
+| 1 | Usage or file I/O error |
+| 2 | Lexical, parse, analysis or simulation error |
 
-- name: Simulate
-  run: ./build/wgslcheck sim shaders/game_of_life.wgsl --dispatch 64 64 1
-```
+## Implemented subset
+
+| Area | Support |
+|---|---|
+| Declarations | Functions, parameters, local `var`/`let`, struct definitions |
+| Types | Type names and nested generic type syntax; no complete type validation |
+| Statements | Blocks, assignments and compound assignments, `if`/`else if`/`else`, `return` |
+| Expressions | Scalar literals, unary/binary operators, named calls, member access |
+| Static analysis | Duplicate declarations/attributes, local name resolution, callable names and argument counts, immutable assignments, shader stage and workgroup-size checks |
+| Scope | Local shadowing, separate function environments, restoration on block exit |
+| Compute builtins | `global_invocation_id`, `local_invocation_id`, `workgroup_id`, `num_workgroups`, `local_invocation_index` |
+| Scalar constructors | `u32`, `i32`, `f32`, `bool`, with zero or one argument |
+| Vectors | Untemplated `vec2`, `vec3`, `vec4` calls with numeric components; scalar splat and component flattening; single-component `.x`/`.r` etc. |
+| Math functions | Scalar `min`, `max`, `abs`, `sqrt`, `floor`, `ceil` |
+
+The checker recognizes the listed math functions and constructors, plus declared functions and structs. Other function names receive an **unknown or unsupported** diagnostic. Vector argument counts receive a coarse check; component widths and types are checked during simulation. Struct constructors are recognized statically but cannot be executed.
+
+The parser does **not** implement global/resource declarations, loops (`loop`, `for`, `while`), `break`, `continue`, `switch`, pointers, array indexing or templated constructor expressions such as `vec3<u32>(...)`. Generic type annotations such as `id: vec3<u32>` are parsed.
+
+Simulation does **not** implement storage buffers, textures, struct instances, shared memory, barriers, atomics, multiple-component swizzles or vector arithmetic. Local variables without initializers produce a simulation diagnostic. Invocation execution is sequential and bounded; it cannot detect GPU data races.
+
+## Numeric behavior and limits
+
+The simulator retains scalar numeric kinds for suffixed literals, supported explicit type annotations and constructors. Supported `u32`/`i32` arithmetic uses 32-bit wrapping, integer division truncates toward zero, signed right shifts preserve the sign, and concrete integer shift counts are reduced modulo 32. Compound assignments use the same operator implementation.
+
+`f32` conversions and arithmetic results are rounded through the host's IEEE binary32 `float`. Integer-to-integer conversions preserve the low 32 bits; floating-point-to-integer conversions clamp to the representable range and truncate. Boolean conversions and zero-value scalar constructors are supported. Arithmetic division by zero and non-finite results are diagnosed.
+
+Remaining limitations are intentional and must be considered when interpreting results:
+
+- This is not full static typing, overload resolution or WGSL constant-expression evaluation. Some invalid type combinations can still reach simulation; declaration/assignment conversions are simplified.
+- Abstract integers are stored exactly only through magnitude `2^53 - 1`; larger values/results are rejected. Abstract floating-point values use host `double`.
+- Abstract-value concretization and GPU floating-point corner cases are not fully modeled. Runtime and constant-expression overflow rules are not distinguished.
+- `f16`/`h` values are rejected during simulation rather than silently treated as doubles; extension directives are not parsed.
+- Vectors retain a common numeric component kind, but mixed component kinds and full vector type inference are unsupported.
+- Workgroup dimensions and total workgroup size are capped at 256 by this tool; these are not device capability queries.
+
+For the language rules, see the [WGSL specification](https://www.w3.org/TR/WGSL/), particularly [numeric conversions](https://www.w3.org/TR/WGSL/#floating-point-conversion). See [architecture](docs/architecture.md) for implementation details.
+
+## Tests
+
+CTest runs the unit/regression executable and four CLI tests: valid checking, valid simulation, missing-file handling, and semantic/numeric regressions. Unit tests cover lexer errors, structs, scope and immutability, conditionals, helper calls, name/argument validation and scalar numeric behavior. CLI regressions assert exact exit codes and relevant diagnostic text.
+
+Add regression cases to `tests/test_wgslcheck.cpp` or the CMake CLI scripts, then run the complete CTest suite before submitting changes.
 
 ## Roadmap
 
-- [x] WGSL lexer
-- [x] WGSL parser (functions, attributes, primitives, control flow)
-- [x] Static analyzer (`check`)
-- [x] CPU simulator (`sim`, `--entry`, `--dispatch`)
-- [x] Struct definitions
-- [ ] Storage/texture bindings
-- [ ] Built-in functions (`dot`, `cross`, `length`, ...)
-- [ ] Workgroup shared memory and barriers
-- [ ] Concurrent workgroup simulation (expose data races)
-- [ ] JSON output for CI integration
-- [ ] Pre-built binaries via GitHub Releases
-
-See the [issues](https://github.com/Sahkaara/wgslcheck/issues) for the live roadmap.
-
-## Contributing
-
-Contributions are welcome — bug reports, feature requests, docs, tests, code.
-
-1. **Open an issue first** for non-trivial changes.
-2. **Fork, branch, PR.** One feature or fix per PR.
-3. **Follow the existing style.** 4-space indent, `snake_case` for functions, `PascalCase` for types.
-4. **Add a test.** If you're fixing a bug, add a test that fails before your fix.
-5. **Run `bash tests/test_basic.sh` before pushing.**
-
-Good first issues are labeled [`good first issue`](https://github.com/Sahkaara/wgslcheck/labels/good%20first%20issue).
+- Complete static type and return-path validation
+- Broader WGSL parser coverage and standard-library builtins
+- Resource bindings, memory and synchronization
+- More complete numeric and vector semantics
+- JSON diagnostics and pre-built releases
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-## Acknowledgments
-
-- [WGSL spec](https://www.w3.org/TR/WGSL/) — the language reference.
-- [Bevy](https://bevyengine.org/) and [wgpu](https://wgpu.rs/) — real-world WGSL used to test the parser.
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) — inspiration for the "zero-dependency, single-binary" philosophy.

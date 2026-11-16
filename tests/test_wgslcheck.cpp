@@ -196,6 +196,81 @@ void test_unsupported_builtin_is_reported() {
     expect(!simulation.ok(), "simulator should report missing builtin annotation");
 }
 
+void test_static_names_and_attributes() {
+    const char* invalid[] = {
+        "fn main() { let x = missing; }",
+        "fn main() { missing = 1; }",
+        "fn main() { missing(); }",
+        "fn helper(x: u32) {} fn main() { helper(); }",
+        "fn main() { if (missing) {} }",
+        "fn main() { if (false) {} else if (missing) {} }",
+        "fn main() { let x = x; }",
+        "fn main() { if (true) { let x = 1; } let y = x; }",
+        "fn main() { let x = min(1); }",
+        "fn main() { let x = sqrt(1, 2); }",
+        "fn main() { let x = u32(1, 2); }",
+        "fn helper() {} fn main() { let helper = 1; helper(); }",
+        "@workgroup_size(1) fn helper() {}",
+        "@vertex @workgroup_size(1) fn main() {}"
+    };
+    for (const auto* source : invalid) {
+        std::vector<wgslcheck::Diagnostic> diagnostics;
+        auto module = parse(source, diagnostics);
+        expect(diagnostics.empty(), "static regression must reach analyzer");
+        expect(!wgslcheck::Analyzer{}.analyze(module).ok(), source);
+    }
+    std::vector<wgslcheck::Diagnostic> diagnostics;
+    auto module = parse(
+        "fn first() -> u32 { return later(1u); } "
+        "fn later(x: u32) -> u32 { let y = x; if (true) { let y = y + 1; } return y; } "
+        "@compute @workgroup_size(1) fn main() { let x = first(); let y = max(x, u32()); }", diagnostics);
+    expect(diagnostics.empty(), "forward calls should parse");
+    expect(wgslcheck::Analyzer{}.analyze(module).ok(), "forward calls and valid scopes should pass");
+}
+
+void test_scalar_numeric_semantics() {
+    const char* conditions[] = {
+        "u32(3.9f) == 3u", "i32(-3.9f) == -3i", "u32(-1.0f) == 0u",
+        "u32(1e20f) == 4294967040u", "i32(1e20f) == 2147483520i",
+        "i32(-1e20f) == i32(-2147483648)",
+        "u32(-1i) == 4294967295u", "i32(4294967295u) == -1i",
+        "f32(16777217u) == 16777216.0", "u32(true) == 1u", "bool(0u) == false",
+        "u32() == 0u", "bool() == false", "f32() == 0.0",
+        "5u / 2u == 2u", "-5i / 2i == -2i", "5.0f / 2.0f == 2.5f",
+        "4294967295u + 1u == 0u", "0u - 1u == 4294967295u",
+        "4294967295u * 4294967295u == 1u", "2147483647i + 1i == i32(-2147483648)",
+        "(-4i >> 1u) == -2i", "(1u << 32u) == 1u", "~0u == 4294967295u",
+        "(16777216.0f + 1.0f) == 16777216.0f",
+        "min(5u, 7u) / 2u == 2u", "abs(-5i) / 2i == 2i",
+        "sqrt(4.0f) == 2.0f", "floor(2.9f) == 2.0f", "ceil(2.1f) == 3.0f",
+        "vec2(5u, 7u).x / 2u == 2u",
+        "f32(16777217u) == 16777217.0"
+    };
+    for (const auto* condition : conditions) {
+        std::vector<wgslcheck::Diagnostic> diagnostics;
+        auto module = parse(std::string("@compute @workgroup_size(1) fn main() { if (!(") +
+            condition + ")) { let failure = 1 / 0; } }", diagnostics);
+        expect(diagnostics.empty(), "numeric semantics regression should parse");
+        expect(wgslcheck::Analyzer{}.analyze(module).ok(), "numeric semantics regression should analyze");
+        expect(wgslcheck::Simulator{}.run(module, {}).ok(), condition);
+    }
+    std::vector<wgslcheck::Diagnostic> diagnostics;
+    auto module = parse(
+        "fn half(x: u32) -> u32 { return x / 2u; } "
+        "@compute @workgroup_size(1) fn main() { "
+        "var x: u32 = 4294967295; x += 1u; x = 5u; x /= 2u; "
+        "var y: f32 = 16777216; y += 1.0f; "
+        "if (x != 2u || y != 16777216.0f || half(5u) != 2u) { let failure = 1/0; } }", diagnostics);
+    expect(diagnostics.empty(), "typed assignment regression should parse");
+    expect(wgslcheck::Simulator{}.run(module, {}).ok(), "typed locals, calls and compound assignments");
+    const char* rejected[] = {"f16(1)", "2.0h", "4294967296u", "2147483648i", "f32(1e100)", "9007199254740992", "1u + 1i"};
+    for (const auto* expression : rejected) {
+        auto invalid = parse(std::string("@compute @workgroup_size(1) fn main() { let x = ") + expression + "; }", diagnostics);
+        expect(diagnostics.empty(), "unsupported numeric regression should parse");
+        expect(!wgslcheck::Simulator{}.run(invalid, {}).ok(), expression);
+    }
+}
+
 void test_nested_variable_scopes() {
     std::vector<wgslcheck::Diagnostic> diagnostics;
     auto module = parse(
@@ -317,7 +392,7 @@ void test_numeric_literal_values() {
     const char* cases[] = {
         "0xf == 15", "0xff == 255", "0xffu == 255u",
         "0x1fi == 31i", "0xFF == 255", "0Xff == 255",
-        "1.5f == 1.5", "2.0h == 2.0", "1e2f == 100.0"
+        "1.5f == 1.5", "2.0f == 2.0", "1e2f == 100.0"
     };
     for (const auto* condition : cases) {
         std::vector<wgslcheck::Diagnostic> diagnostics;
@@ -367,6 +442,8 @@ int main() {
     test_else_if_execution();
     test_numeric_suffix_validation();
     test_nested_variable_scopes();
+    test_static_names_and_attributes();
+    test_scalar_numeric_semantics();
     
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

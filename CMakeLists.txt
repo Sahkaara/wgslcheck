@@ -111,4 +111,8 @@ if (BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}"
             "-DEXECUTABLE=$<TARGET_FILE:wgslcheck>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli_missing_file.cmake")
+    add_test(NAME wgslcheck_cli_regressions
+        COMMAND "${CMAKE_COMMAND}"
+            "-DEXECUTABLE=$<TARGET_FILE:wgslcheck>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli_regressions.cmake")
 endif()
