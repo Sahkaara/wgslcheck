@@ -228,7 +228,8 @@ Use it in a pipeline:
 - [x] WGSL parser (functions, attributes, primitives, control flow)
 - [x] Static analyzer (`check`)
 - [x] CPU simulator (`sim`, `--entry`, `--dispatch`)
-- [ ] Structs and storage/texture bindings
+- [x] Struct definitions
+- [ ] Storage/texture bindings
 - [ ] Built-in functions (`dot`, `cross`, `length`, ...)
 - [ ] Workgroup shared memory and barriers
 - [ ] Concurrent workgroup simulation (expose data races)
