@@ -55,6 +55,24 @@ struct ReturnSignal {
     Value value;
 };
 
+// Mutability belongs to a function invocation, just like its local values.
+// Restore the caller's bindings even when execution unwinds through an error.
+class ImmutableFrame {
+public:
+    using Bindings = std::unordered_map<std::string, std::size_t>;
+
+    explicit ImmutableFrame(Bindings& bindings) : bindings_(bindings) {
+        saved_.swap(bindings_);
+    }
+    ~ImmutableFrame() { saved_.swap(bindings_); }
+    ImmutableFrame(const ImmutableFrame&) = delete;
+    ImmutableFrame& operator=(const ImmutableFrame&) = delete;
+
+private:
+    Bindings& bindings_;
+    Bindings saved_;
+};
+
 /**
  * @brief Parses an integer literal from a string, respecting WGSL suffixes.
  */
@@ -104,6 +122,7 @@ public:
                 const std::array<unsigned, 3>& workgroup_size) {
         
         std::unordered_map<std::string, Value> environment;
+        ImmutableFrame frame(immutable_);
         
         // Calculate built-in IDs
         const std::array<unsigned, 3> global{
@@ -410,6 +429,7 @@ private:
         }
         
         std::unordered_map<std::string, Value> locals;
+        ImmutableFrame frame(immutable_);
         std::vector<std::string> immutable_parameters;
         for (std::size_t i = 0; i < arguments.size(); ++i) {
             locals.emplace(target.parameters[i].name, arguments[i]);

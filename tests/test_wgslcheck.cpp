@@ -196,6 +196,34 @@ void test_unsupported_builtin_is_reported() {
     expect(!simulation.ok(), "simulator should report missing builtin annotation");
 }
 
+void test_function_mutability_isolation() {
+    std::vector<wgslcheck::Diagnostic> diagnostics;
+    auto module = parse(
+        "fn helper() -> u32 { var value = 1u; value += 1u; return value; }\n"
+        "@compute @workgroup_size(2) fn main() {\n"
+        "  let value = 10u;\n"
+        "  if (helper() != 2u) { let failure = 1 / 0; }\n"
+        "}\n", diagnostics);
+    expect(diagnostics.empty(), "independent function locals should parse");
+    expect(wgslcheck::Analyzer{}.analyze(module).ok(),
+           "independent function locals should pass analysis");
+    expect(wgslcheck::Simulator{}.run(module, {}).ok(),
+           "caller let must not make a helper local immutable");
+
+    auto immutable = parse(
+        "fn helper() { var value = 1u; }\n"
+        "@compute @workgroup_size(1) fn main() {\n"
+        "  let value = 10u; helper(); value = 20u;\n"
+        "}\n", diagnostics);
+    expect(diagnostics.empty(), "caller mutability regression should parse");
+    const auto result = wgslcheck::Simulator{}.run(immutable, {});
+    expect(!result.ok(), "helper cleanup must preserve caller immutability");
+    if (!result.diagnostics.empty()) {
+        expect(result.diagnostics.front().message.find("immutable") != std::string::npos,
+               "caller assignment must report immutability");
+    }
+}
+
 void test_numeric_literal_values() {
     const char* cases[] = {
         "0xf == 15", "0xff == 255", "0xffu == 255u",
@@ -246,6 +274,7 @@ int main() {
     test_unsupported_builtin_is_reported();
     test_struct_parsing();
     test_numeric_literal_values();
+    test_function_mutability_isolation();
     
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
