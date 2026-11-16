@@ -107,4 +107,8 @@ if (BUILD_TESTING)
     add_test(NAME wgslcheck_cli_sim
         COMMAND wgslcheck sim "${CMAKE_CURRENT_SOURCE_DIR}/examples/sample.wgsl"
                 --dispatch 2 1 1)
+    add_test(NAME wgslcheck_cli_missing_file
+        COMMAND "${CMAKE_COMMAND}"
+            "-DEXECUTABLE=$<TARGET_FILE:wgslcheck>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli_missing_file.cmake")
 endif()

@@ -228,6 +228,7 @@ int main() {
     test_nested_generic_type_and_simulator_errors();
     test_helper_calls_and_compound_shifts();
     test_unsupported_builtin_is_reported();
+    test_struct_parsing();
     
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

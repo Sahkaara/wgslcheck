@@ -54,7 +54,7 @@ bool parse_positive(std::string_view text, unsigned& value) {
 
 /**
  * @brief The core pipeline: Read -> Lex -> Parse -> Analyze -> Simulate.
- * @return Exit code (0 = success, 2 = processing error).
+ * @return Exit code (0 = success, 1 = I/O error, 2 = processing error).
  */
 int run(const std::string& command, const std::string& path,
         const wgslcheck::SimulationOptions& simulation_options) {
@@ -63,13 +63,13 @@ int run(const std::string& command, const std::string& path,
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         std::cerr << "error: cannot open '" << path << "'\n";
-        return 2;
+        return 1;
     }
     const std::string source((std::istreambuf_iterator<char>(input)),
                              std::istreambuf_iterator<char>());
     if (input.bad()) {
         std::cerr << "error: failed while reading '" << path << "'\n";
-        return 2;
+        return 1;
     }
 
     // 2. Lexing
